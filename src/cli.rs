@@ -66,6 +66,8 @@ pub enum Cmd {
     Rules,
     /// Create a preset interactively
     New,
+    /// What a preset backs up, what it skips and why, with exclude hints
+    Audit { preset: String },
     #[command(name = "__worker", hide = true)]
     Worker,
 }
@@ -106,6 +108,25 @@ fn dispatch(cli: &Cli, config_path: &Path) -> i32 {
         Some(Cmd::Init) => cmd_init(config_path),
         Some(Cmd::Rules) => cmd_rules(),
         Some(Cmd::New) => cmd_new(cli, config_path),
+        Some(Cmd::Audit { preset }) => match load_config(config_path) {
+            Ok(c) => match c.get(preset) {
+                Some(p) => match crate::audit::audit(p, crate::audit::HINT_MIN_BYTES) {
+                    Ok(rep) => {
+                        crate::audit::print(p, &rep, &config::home_dir());
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("✗ {e}");
+                        2
+                    }
+                },
+                None => {
+                    eprintln!("✗ unknown preset {preset:?}");
+                    2
+                }
+            },
+            Err(code) => code,
+        },
         Some(Cmd::Edit) => cmd_edit(config_path, cli.yes || !interactive()),
         Some(Cmd::Log { preset, limit }) => cmd_log(preset.as_deref(), *limit),
         Some(Cmd::List) => match load_config(config_path) {
