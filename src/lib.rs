@@ -9,6 +9,7 @@ pub mod preflight;
 pub mod relpath;
 pub mod rules;
 pub mod scan;
+pub mod worker;
 
 /// Destination marker file (spec §3.6).
 pub const MARKER_NAME: &str = ".bupr-dest";
