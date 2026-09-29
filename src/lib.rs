@@ -4,6 +4,7 @@
 pub mod config;
 pub mod dest;
 pub mod plan;
+pub mod preflight;
 pub mod relpath;
 pub mod rules;
 pub mod scan;
