@@ -219,3 +219,87 @@ fn several_presets_and_all() {
         .stdout(predicate::str::contains("skipping gone").and(predicate::str::contains("✓ dev")));
     bupr(&c).args(["dev", "gone"]).assert().code(2);
 }
+
+#[test]
+fn rules_lists_the_packs() {
+    let c = cli_fx("");
+    bupr(&c).arg("rules").assert().success().stdout(
+        predicate::str::contains("target/ next to Cargo.toml")
+            .and(predicate::str::contains("junk")),
+    );
+}
+
+#[test]
+fn init_writes_a_starter_config_once() {
+    let mut c = cli_fx("");
+    c.config = c.fx.root.join("fresh/config.toml");
+    bupr(&c).arg("init").assert().success();
+    assert!(
+        fs::read_to_string(&c.config)
+            .unwrap()
+            .contains("[presets.dev]")
+    );
+    bupr(&c)
+        .arg("init")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("already exists"));
+}
+
+#[test]
+fn list_shows_status_and_log_shows_runs() {
+    let c = cli_fx(
+        "\n[presets.gone]\nsource = \"/tmp\"\ndestination = \"/Volumes/bupr-test-no-such-volume/x\"\n",
+    );
+    write(&c.fx.src, "a.txt", b"a");
+    bupr(&c).arg("list").assert().success().stdout(
+        predicate::str::contains("never").and(predicate::str::contains("(drive not mounted)")),
+    );
+    bupr(&c).arg("dev").assert().success();
+    bupr(&c)
+        .arg("log")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dev").and(predicate::str::contains("ok")));
+    bupr(&c)
+        .args(["log", "gone"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No runs"));
+}
+
+#[test]
+fn edit_validates_before_saving() {
+    let c = cli_fx("");
+    let before = fs::read_to_string(&c.config).unwrap();
+    let good = c.fx.root.join("good-editor.sh");
+    fs::write(&good, "#!/bin/sh\nprintf '\\n# edited\\n' >> \"$1\"\n").unwrap();
+    chmod(&good, 0o755);
+    bupr(&c)
+        .arg("edit")
+        .env("EDITOR", &good)
+        .env_remove("VISUAL")
+        .assert()
+        .success();
+    assert!(
+        fs::read_to_string(&c.config)
+            .unwrap()
+            .ends_with("# edited\n")
+    );
+
+    let bad = c.fx.root.join("bad-editor.sh");
+    fs::write(&bad, "#!/bin/sh\nprintf 'bogus = 1\\n' >> \"$1\"\n").unwrap();
+    chmod(&bad, 0o755);
+    bupr(&c)
+        .arg("edit")
+        .env("EDITOR", &bad)
+        .env_remove("VISUAL")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("bogus"));
+    assert_eq!(
+        fs::read_to_string(&c.config).unwrap(),
+        format!("{before}\n# edited\n")
+    );
+    assert!(!c.fx.root.join("config.toml.edit").exists());
+}

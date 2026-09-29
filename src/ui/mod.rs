@@ -3,5 +3,6 @@
 
 pub mod dashboard;
 pub mod format;
+pub mod menu;
 pub mod plain;
 pub mod prompt;
