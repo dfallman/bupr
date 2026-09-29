@@ -2,8 +2,11 @@
 //! Nothing in this module opens a file for writing (spec §3.2).
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,8 +14,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use serde::{Deserialize, Serialize};
 
 use crate::relpath::RelPath;
-use crate::rules::{Decision, Filter, Reason};
+use crate::rules::{Decision, Filter, Reason, Siblings};
 use crate::{MARKER_NAME, TMP_PREFIX};
+
+/// Extended attributes the system maintains on its own (or that cannot be
+/// copied by an ordinary process). They are left out of change detection and
+/// of the "not copied" warnings.
+pub const VOLATILE_XATTRS: &[&str] = &[
+    "com.apple.provenance",
+    "com.apple.quarantine",
+    "com.apple.macl",
+    "com.apple.lastuseddate#PS",
+    "com.apple.rootless",
+    "com.apple.decmpfs",
+];
+
+pub fn is_volatile_xattr(name: &OsStr) -> bool {
+    VOLATILE_XATTRS
+        .iter()
+        .any(|v| v.as_bytes() == name.as_bytes())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
@@ -26,13 +47,19 @@ pub struct Entry {
     pub rel: RelPath,
     pub kind: Kind,
     pub size: u64,
-    /// Seconds since the epoch (whole seconds; spec §6.1).
+    /// Bytes allocated on disk (less than `size` for sparse or compressed files).
+    pub alloc: u64,
+    /// Seconds since the epoch.
     pub mtime: i64,
+    pub mtime_nsec: u32,
     pub mode: u32,
     pub link_target: Option<PathBuf>,
-    /// Inode number at scan time (destination entries are re-checked
-    /// against it before deletion).
+    /// Inode number at scan time. Source files are re-checked against it
+    /// when opened for copying, destination entries before removal.
     pub ino: u64,
+    /// Fingerprint of a file's extended attributes (0 when it has none, or
+    /// when it was not computed).
+    pub xattrs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,26 +76,64 @@ pub struct SourceScan {
     pub excluded: Vec<ExcludedEntry>,
     pub secret_files: u64,
     pub skipped_special: u64,
-    pub skipped_mounts: u64,
+    /// Directories on another filesystem, not descended into.
+    pub mounts: Vec<RelPath>,
+    /// Names that are not valid UTF-8, which the mirror cannot represent.
+    pub skipped_names: Vec<String>,
     pub errors: Vec<(String, String)>,
+    /// Paths that could not be read. Their destination copies are kept.
+    pub pins: Vec<RelPath>,
 }
 
 #[derive(Debug, Default)]
 pub struct DestScan {
     pub entries: Vec<Entry>,
+    /// Leftovers of an earlier run (`.bupr-tmp-*`), not descended into.
     pub temp_files: Vec<RelPath>,
+    /// Directories on another filesystem, never descended into or deleted.
+    pub mounts: Vec<RelPath>,
     pub errors: Vec<(String, String)>,
+    /// Paths that could not be read, so what is below them is unknown.
+    pub pins: Vec<RelPath>,
 }
 
-fn entry(rel: RelPath, kind: Kind, meta: &fs::Metadata, link_target: Option<PathBuf>) -> Entry {
+/// Names and values of a file's extended attributes, hashed.
+fn xattr_fingerprint(path: &Path) -> u64 {
+    let Ok(names) = xattr::list(path) else {
+        return 0;
+    };
+    let mut names: Vec<_> = names.filter(|n| !is_volatile_xattr(n)).collect();
+    if names.is_empty() {
+        return 0;
+    }
+    names.sort();
+    let mut h = DefaultHasher::new();
+    for n in names {
+        n.hash(&mut h);
+        xattr::get(path, &n).ok().flatten().hash(&mut h);
+    }
+    h.finish() | 1
+}
+
+fn entry(
+    rel: RelPath,
+    kind: Kind,
+    meta: &fs::Metadata,
+    link_target: Option<PathBuf>,
+    xattrs: u64,
+) -> Entry {
+    let file = kind == Kind::File;
     Entry {
         rel,
         kind,
-        size: if kind == Kind::File { meta.len() } else { 0 },
+        size: if file { meta.len() } else { 0 },
+        alloc: if file { meta.blocks() * 512 } else { 0 },
         mtime: meta.mtime(),
+        mtime_nsec: meta.mtime_nsec() as u32,
         mode: meta.mode() & 0o7777,
         link_target,
         ino: meta.ino(),
+        xattrs,
     }
 }
 
@@ -80,24 +145,18 @@ fn interrupted() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "interrupted")
 }
 
-/// Sorted UTF-8 names in `dir`; other names are reported and skipped.
-fn read_names(
-    dir: &Path,
-    rel: Option<&RelPath>,
-    errors: &mut Vec<(String, String)>,
-) -> io::Result<Vec<String>> {
+/// Sorted UTF-8 names in `dir`, and the others (lossy) that were skipped.
+fn read_names(dir: &Path, rel: Option<&RelPath>) -> io::Result<(Vec<String>, Vec<String>)> {
     let mut names = Vec::new();
+    let mut skipped = Vec::new();
     for e in fs::read_dir(dir)? {
         match e?.file_name().into_string() {
             Ok(n) => names.push(n),
-            Err(raw) => errors.push((
-                format!("{}/{}", label(rel), raw.to_string_lossy()),
-                "name is not valid UTF-8; skipped".to_string(),
-            )),
+            Err(raw) => skipped.push(format!("{}/{}", label(rel), raw.to_string_lossy())),
         }
     }
     names.sort();
-    Ok(names)
+    Ok((names, skipped))
 }
 
 pub fn scan_source(
@@ -122,13 +181,20 @@ pub fn scan_source(
         if cancel.load(Ordering::Relaxed) {
             return Err(interrupted());
         }
-        let names = match read_names(&dir_abs, dir_rel.as_ref(), &mut out.errors) {
-            Ok(n) => n,
-            Err(e) => {
-                out.errors.push((label(dir_rel.as_ref()), e.to_string()));
+        let names = match (read_names(&dir_abs, dir_rel.as_ref()), &dir_rel) {
+            (Ok((names, skipped)), _) => {
+                out.skipped_names.extend(skipped);
+                names
+            }
+            // Nothing is known about the source without its top level.
+            (Err(e), None) => return Err(e),
+            (Err(e), Some(rel)) => {
+                out.errors.push((rel.to_string(), e.to_string()));
+                out.pins.push(rel.clone());
                 continue;
             }
         };
+        let sibs = Siblings::new(&names);
         for name in &names {
             if dir_rel.is_none() && name == MARKER_NAME {
                 continue;
@@ -146,12 +212,13 @@ pub fn scan_source(
                 Ok(m) => m,
                 Err(e) => {
                     out.errors.push((rel.to_string(), e.to_string()));
+                    out.pins.push(rel);
                     continue;
                 }
             };
             let ft = meta.file_type();
             let is_dir = ft.is_dir();
-            if let Decision::Exclude(reason) = filter.decide(&rel, is_dir, &names, dir_excluded) {
+            if let Decision::Exclude(reason) = filter.decide(&rel, is_dir, &sibs, dir_excluded) {
                 if !dir_excluded {
                     out.excluded.push(ExcludedEntry {
                         rel: rel.clone(),
@@ -166,10 +233,11 @@ pub fn scan_source(
             }
             if is_dir {
                 if meta.dev() != dev {
-                    out.skipped_mounts += 1;
+                    out.mounts.push(rel);
                     continue;
                 }
-                out.entries.push(entry(rel.clone(), Kind::Dir, &meta, None));
+                out.entries
+                    .push(entry(rel.clone(), Kind::Dir, &meta, None, 0));
                 stack.push((abs, Some(rel), false));
             } else if ft.is_file() {
                 if filter.is_secret(&rel) {
@@ -178,15 +246,21 @@ pub fn scan_source(
                 files += 1;
                 bytes += meta.len();
                 progress(files, bytes);
-                out.entries.push(entry(rel, Kind::File, &meta, None));
+                let xattrs = xattr_fingerprint(&abs);
+                out.entries
+                    .push(entry(rel, Kind::File, &meta, None, xattrs));
             } else if ft.is_symlink() {
                 match fs::read_link(&abs) {
                     Ok(t) => {
                         files += 1;
                         progress(files, bytes);
-                        out.entries.push(entry(rel, Kind::Symlink, &meta, Some(t)));
+                        out.entries
+                            .push(entry(rel, Kind::Symlink, &meta, Some(t), 0));
                     }
-                    Err(e) => out.errors.push((rel.to_string(), e.to_string())),
+                    Err(e) => {
+                        out.errors.push((rel.to_string(), e.to_string()));
+                        out.pins.push(rel);
+                    }
                 }
             } else {
                 out.skipped_special += 1;
@@ -195,6 +269,7 @@ pub fn scan_source(
     }
     add_missing_ancestors(root, &mut out);
     out.entries.sort_by(|a, b| a.rel.cmp(&b.rel));
+    out.mounts.sort();
     Ok(out)
 }
 
@@ -215,16 +290,21 @@ fn add_missing_ancestors(root: &Path, out: &mut SourceScan) {
     }
     for rel in missing {
         match fs::symlink_metadata(root.join(rel.as_path())) {
-            Ok(m) if m.is_dir() => out.entries.push(entry(rel, Kind::Dir, &m, None)),
+            Ok(m) if m.is_dir() => out.entries.push(entry(rel, Kind::Dir, &m, None, 0)),
             Ok(_) => {}
-            Err(e) => out.errors.push((rel.to_string(), e.to_string())),
+            Err(e) => {
+                out.errors.push((rel.to_string(), e.to_string()));
+                out.pins.push(rel);
+            }
         }
     }
 }
 
-pub fn scan_dest(root: &Path, cancel: &AtomicBool) -> io::Result<DestScan> {
+/// Walks the destination. `fingerprint` computes each file's extended
+/// attribute fingerprint, for volumes where they are compared.
+pub fn scan_dest(root: &Path, fingerprint: bool, cancel: &AtomicBool) -> io::Result<DestScan> {
     let mut out = DestScan::default();
-    match fs::symlink_metadata(root) {
+    let dev = match fs::symlink_metadata(root) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(out),
         Err(e) => return Err(e),
         Ok(m) if !m.is_dir() => {
@@ -233,17 +313,28 @@ pub fn scan_dest(root: &Path, cancel: &AtomicBool) -> io::Result<DestScan> {
                 format!("{} is not a directory", root.display()),
             ));
         }
-        Ok(_) => {}
-    }
+        Ok(m) => m.dev(),
+    };
     let mut stack: Vec<(PathBuf, Option<RelPath>)> = vec![(root.to_path_buf(), None)];
     while let Some((dir_abs, dir_rel)) = stack.pop() {
         if cancel.load(Ordering::Relaxed) {
             return Err(interrupted());
         }
-        let names = match read_names(&dir_abs, dir_rel.as_ref(), &mut out.errors) {
-            Ok(n) => n,
+        let names = match read_names(&dir_abs, dir_rel.as_ref()) {
+            Ok((names, skipped)) => {
+                // Such a name can never be matched or replaced, so it stays.
+                for s in skipped {
+                    out.errors
+                        .push((s, "name is not valid UTF-8; left alone".to_string()));
+                }
+                names
+            }
             Err(e) => {
                 out.errors.push((label(dir_rel.as_ref()), e.to_string()));
+                match dir_rel {
+                    Some(rel) => out.pins.push(rel),
+                    None => return Err(e),
+                }
                 continue;
             }
         };
@@ -259,26 +350,38 @@ pub fn scan_dest(root: &Path, cancel: &AtomicBool) -> io::Result<DestScan> {
                 Ok(m) => m,
                 Err(e) => {
                     out.errors.push((rel.to_string(), e.to_string()));
+                    out.pins.push(rel);
                     continue;
                 }
             };
             let ft = meta.file_type();
-            if name.starts_with(TMP_PREFIX) && ft.is_file() {
+            if ft.is_dir() && meta.dev() != dev {
+                out.mounts.push(rel);
+            } else if name.starts_with(TMP_PREFIX) {
                 out.temp_files.push(rel);
             } else if ft.is_dir() {
-                out.entries.push(entry(rel.clone(), Kind::Dir, &meta, None));
+                out.entries
+                    .push(entry(rel.clone(), Kind::Dir, &meta, None, 0));
                 stack.push((abs, Some(rel)));
             } else if ft.is_symlink() {
                 let target = fs::read_link(&abs).ok();
-                out.entries.push(entry(rel, Kind::Symlink, &meta, target));
+                out.entries
+                    .push(entry(rel, Kind::Symlink, &meta, target, 0));
             } else {
                 // Regular files, and anything special, which a mirror removes like a file.
-                out.entries.push(entry(rel, Kind::File, &meta, None));
+                let xattrs = if fingerprint && ft.is_file() {
+                    xattr_fingerprint(&abs)
+                } else {
+                    0
+                };
+                out.entries
+                    .push(entry(rel, Kind::File, &meta, None, xattrs));
             }
         }
     }
     out.entries.sort_by(|a, b| a.rel.cmp(&b.rel));
     out.temp_files.sort();
+    out.mounts.sort();
     Ok(out)
 }
 
@@ -398,12 +501,57 @@ mod tests {
         let (_t, r) = tmp();
         tu::write(&r, ".bupr-dest", b"{}");
         tu::write(&r, "x/.bupr-tmp-1-a", b"partial");
+        tu::mkdir(&r, ".bupr-tmp-2-staged/inner");
         tu::write(&r, "x/a", b"a");
         tu::write(&r, "target/big", b"b");
-        let d = scan_dest(&r, &AtomicBool::new(false)).unwrap();
+        let d = scan_dest(&r, false, &AtomicBool::new(false)).unwrap();
         assert_eq!(rels(&d.entries), ["target", "target/big", "x", "x/a"]);
-        assert_eq!(d.temp_files, vec![RelPath::new("x/.bupr-tmp-1-a").unwrap()]);
-        let missing = scan_dest(&r.join("nope"), &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            d.temp_files,
+            vec![
+                RelPath::new(".bupr-tmp-2-staged").unwrap(),
+                RelPath::new("x/.bupr-tmp-1-a").unwrap()
+            ]
+        );
+        let missing = scan_dest(&r.join("nope"), false, &AtomicBool::new(false)).unwrap();
         assert!(missing.entries.is_empty());
+    }
+
+    #[test]
+    fn unreadable_folders_are_pinned_not_fatal() {
+        let (_t, r) = tmp();
+        tu::write(&r, "ok.txt", b"o");
+        tu::write(&r, "locked/a.txt", b"a");
+        tu::chmod(&r.join("locked"), 0o000);
+        let s = scan(&r, &[], &[], &[]);
+        let d = scan_dest(&r, false, &AtomicBool::new(false)).unwrap();
+        tu::chmod(&r.join("locked"), 0o755);
+        assert_eq!(rels(&s.entries), ["locked", "ok.txt"]);
+        assert_eq!(s.pins, vec![RelPath::new("locked").unwrap()]);
+        assert_eq!(s.errors.len(), 1);
+        assert_eq!(d.pins, vec![RelPath::new("locked").unwrap()]);
+    }
+
+    #[test]
+    fn records_allocation_nanoseconds_and_xattr_fingerprints() {
+        let (_t, r) = tmp();
+        tu::write(&r, "plain", b"p");
+        tu::write(&r, "tagged", b"t");
+        tu::set_xattr(&r.join("tagged"), "com.example.tag", b"red");
+        let s = scan(&r, &[], &[], &[]);
+        let (plain, tagged) = (&s.entries[0], &s.entries[1]);
+        assert_eq!(plain.xattrs, 0);
+        assert_ne!(tagged.xattrs, 0);
+        assert!(plain.alloc > 0);
+        tu::set_xattr(&r.join("tagged"), "com.example.tag", b"blue");
+        assert_ne!(scan(&r, &[], &[], &[]).entries[1].xattrs, tagged.xattrs);
+        tu::set_xattr(&r.join("plain"), "com.apple.quarantine", b"0081;x");
+        assert_eq!(
+            scan(&r, &[], &[], &[]).entries[0].xattrs,
+            0,
+            "system-maintained attributes are not part of the fingerprint"
+        );
+        let d = scan_dest(&r, true, &AtomicBool::new(false)).unwrap();
+        assert_eq!(d.entries[1].xattrs, xattr_fingerprint(&r.join("tagged")));
     }
 }

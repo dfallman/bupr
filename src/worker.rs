@@ -25,24 +25,75 @@ pub struct WorkerInit {
     pub env: Env,
 }
 
-fn sbpl_quote(p: &Path) -> String {
-    let s = p.to_string_lossy();
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+/// What the dynamic loader and libSystem read: the shared cache and its
+/// cryptex, Rosetta, and `/dev`. dyld also reads `/` itself (without it,
+/// every process aborts at launch), so the profile allows that literal.
+const SYSTEM_READS: &[&str] = &[
+    "/System",
+    "/usr/lib",
+    "/private/preboot",
+    "/private/var/db/dyld",
+    "/Library/Apple",
+    "/private/var/db/oah",
+    "/dev",
+];
+
+/// Quote a path as an SBPL string. Control characters (a newline ends the
+/// string) and non-UTF-8 names (a lossy conversion names another path) are
+/// refused rather than escaped.
+fn sbpl_quote(p: &Path) -> Result<String, String> {
+    let s = p
+        .to_str()
+        .filter(|s| !s.chars().any(|c| c.is_ascii_control()))
+        .ok_or_else(|| format!("cannot sandbox {p:?}: control character or invalid UTF-8"))?;
+    Ok(format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
 }
 
-/// Kernel sandbox profile: deny every file write except inside `write_root`
-/// and the creation of `create_dirs`. `None` denies all writes (dry run,
-/// simulate).
-pub fn sandbox_profile(write_root: Option<&Path>, create_dirs: &[PathBuf]) -> String {
-    let mut s = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
-    if let Some(root) = write_root {
-        s += &format!("(allow file-write* (subpath {}))\n", sbpl_quote(root));
-        for d in create_dirs {
-            s += &format!("(allow file-write-create (literal {}))\n", sbpl_quote(d));
+/// Kernel sandbox profile for one preset. No network. File contents are
+/// readable only in `source`, `dest`, its `missing` ancestors, the worker
+/// executable and system libraries; metadata stays readable everywhere (path
+/// resolution, volume checks). Writes only inside `dest` and creation of
+/// `missing`, and none unless `write` (dry run, simulate).
+///
+/// SBPL is last-match-wins, except that a rule naming an operation beats a
+/// wildcard (`file-read-metadata` over `file-read*`): a later
+/// `(allow file-read* ...)` would not undo a `(deny file-read-data)`.
+pub fn sandbox_profile(
+    source: &Path,
+    dest: &Path,
+    missing: &[PathBuf],
+    write: bool,
+) -> Result<String, String> {
+    let exe = std::env::current_exe().ok();
+    let exes = exe
+        .iter()
+        .flat_map(|e| [Some(e.clone()), e.canonicalize().ok().filter(|c| c != e)])
+        .flatten();
+    let mut s = String::from(
+        "(version 1)\n(allow default)\n(deny network*)\n(deny file-read*)\n\
+         (allow file-read-metadata)\n(allow file-read*\n  (literal \"/\")\n",
+    );
+    for r in SYSTEM_READS {
+        s += &format!("  (subpath \"{r}\")\n");
+    }
+    for p in [source, dest] {
+        s += &format!("  (subpath {})\n", sbpl_quote(p)?);
+    }
+    for p in missing.iter().cloned().chain(exes) {
+        s += &format!("  (literal {})\n", sbpl_quote(&p)?);
+    }
+    s += ")\n(deny file-write*)\n";
+    if write {
+        s += &format!("(allow file-write* (subpath {}))\n", sbpl_quote(dest)?);
+        for d in missing {
+            s += &format!("(allow file-write-create (literal {}))\n", sbpl_quote(d)?);
         }
     }
     s += "(allow file-write-data (literal \"/dev/null\"))\n";
-    s
+    Ok(s)
 }
 
 pub fn sandbox_available() -> bool {
@@ -165,27 +216,43 @@ pub fn worker_main() -> i32 {
 mod tests {
     use super::*;
 
+    fn profile(dest: &str, write: bool) -> Result<String, String> {
+        let media = PathBuf::from("/Volumes/B/media");
+        sandbox_profile(Path::new("/src"), Path::new(dest), &[media], write)
+    }
+
     #[test]
     fn profile_allows_only_the_destination_and_missing_ancestors() {
-        let p = sandbox_profile(
-            Some(Path::new("/Volumes/B/media/video")),
-            &[PathBuf::from("/Volumes/B/media")],
-        );
+        let p = profile("/Volumes/B/media/video", true).unwrap();
+        assert!(p.contains("(deny network*)"));
         assert!(p.contains("(deny file-write*)"));
         assert!(p.contains("(allow file-write* (subpath \"/Volumes/B/media/video\"))"));
         assert!(p.contains("(allow file-write-create (literal \"/Volumes/B/media\"))"));
+        assert!(p.contains("  (subpath \"/src\")\n  (subpath \"/Volumes/B/media/video\")\n"));
+        assert!(p.contains("  (literal \"/Volumes/B/media\")\n"));
     }
 
     #[test]
     fn read_only_profile_allows_no_writes() {
-        let p = sandbox_profile(None, &[]);
+        let p = profile("/Volumes/B/media/video", false).unwrap();
         assert!(p.contains("(deny file-write*)"));
-        assert!(!p.contains("subpath"));
+        assert!(!p.contains("(allow file-write* "));
+        assert!(!p.contains("file-write-create"));
     }
 
     #[test]
     fn quoting_escapes_quotes_and_backslashes() {
-        let p = sandbox_profile(Some(Path::new("/x/a\"b\\c")), &[]);
+        let p = profile("/x/a\"b\\c", true).unwrap();
         assert!(p.contains(r#"(subpath "/x/a\"b\\c")"#), "{p}");
+    }
+
+    #[test]
+    fn control_characters_and_invalid_utf8_are_refused() {
+        for bad in ["/x/a\nb", "/x/a\rb", "/x/a\0b", "/x/a\x7fb", "/x/a\x1bb"] {
+            assert!(profile(bad, true).is_err(), "{bad:?}");
+        }
+        use std::os::unix::ffi::OsStrExt;
+        let p = Path::new(std::ffi::OsStr::from_bytes(b"/x/\xff"));
+        assert!(sandbox_profile(p, Path::new("/d"), &[], false).is_err());
     }
 }

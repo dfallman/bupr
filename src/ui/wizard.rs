@@ -262,17 +262,12 @@ pub fn run(config_path: &Path, env: &Env) -> anyhow::Result<Option<String>> {
     {
         return Ok(None);
     }
-    let mut text = existing_text.clone();
-    if !text.is_empty() && !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(&block);
-    Config::parse(&text, config_path, &home)?;
-    if existing_text.is_empty() && !config_path.exists() {
-        state::write_new_config(config_path, &text)?;
-    } else {
-        state::replace_config(config_path, &text)?;
-    }
+    // Appends to the config as it is now: `bupr edit` may have saved meanwhile.
+    state::append_config(config_path, &block, |text| {
+        Config::parse(text, config_path, &home)
+            .map(drop)
+            .map_err(anyhow::Error::from)
+    })?;
     println!("✓ Added preset {name} to {}", tilde(config_path, &home));
     Ok(Some(name))
 }

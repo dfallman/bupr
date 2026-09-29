@@ -74,4 +74,20 @@ impl Prompter for InquirePrompter {
             .prompt()
             .unwrap_or(false)
     }
+
+    fn secrets(&mut self, preset: &Preset, s: &PlanSummary) -> bool {
+        println!(
+            "{} secret file(s) such as .env or keys would be copied to {}, which is not known to be encrypted.",
+            count(s.secret_files),
+            tilde(&s.dest, &self.home)
+        );
+        println!(
+            "Preset \"{}\" sets secrets_require_encryption.",
+            preset.name
+        );
+        Confirm::new("Copy them anyway?")
+            .with_default(false)
+            .prompt()
+            .unwrap_or(false)
+    }
 }

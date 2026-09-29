@@ -344,7 +344,7 @@ fn cmd_init(path: &Path) -> i32 {
 }
 
 fn cmd_edit(path: &Path, unattended: bool) -> i32 {
-    let edit = match crate::state::begin_edit(path) {
+    let (edit, original) = match crate::state::begin_edit(path) {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             eprintln!(
@@ -358,27 +358,51 @@ fn cmd_edit(path: &Path, unattended: bool) -> i32 {
             return 2;
         }
     };
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".into());
+    let (var, editor) = ["VISUAL", "EDITOR"]
+        .into_iter()
+        .find_map(|v| {
+            std::env::var(v)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| (v, s))
+        })
+        .unwrap_or(("EDITOR", "vi".into()));
+    let argv = match split_editor(&editor, &config::home_dir()) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("✗ ${var} {editor:?}: {e}");
+            let _ = crate::state::discard_edit(&edit);
+            return 2;
+        }
+    };
     loop {
-        let status = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!("{editor} \"$1\""))
-            .arg("sh")
+        let status = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
             .arg(&edit)
             .status();
         if let Err(e) = status {
-            eprintln!("✗ cannot start {editor}: {e}");
+            eprintln!("✗ cannot start {}: {e}", argv[0]);
             let _ = crate::state::discard_edit(&edit);
             return 2;
         }
         let text = std::fs::read_to_string(&edit).unwrap_or_default();
         match Config::parse(&text, path, &config::home_dir()) {
             Ok(c) => {
-                if let Err(e) = crate::state::commit_edit(&edit, path) {
-                    eprintln!("✗ cannot save {}: {e}", path.display());
-                    return 2;
+                match crate::state::commit_edit(&edit, path, &original) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        eprintln!(
+                            "✗ {} changed while you were editing (another `bupr new` or `bupr edit`). \
+                             Your version is kept in {}; merge it and run `bupr edit` again.",
+                            path.display(),
+                            edit.display()
+                        );
+                        return 2;
+                    }
+                    Err(e) => {
+                        eprintln!("✗ cannot save {}: {e}", path.display());
+                        return 2;
+                    }
                 }
                 println!("✓ Saved {} ({} presets).", path.display(), c.presets.len());
                 return 0;
@@ -400,6 +424,65 @@ fn cmd_edit(path: &Path, unattended: bool) -> i32 {
             }
         }
     }
+}
+
+/// Split `$VISUAL`/`$EDITOR` into argv words without a shell: whitespace
+/// separates, quotes group, a backslash escapes and a leading `~/` is home.
+/// Anything that would need a real shell (expansion, operators, globs) is an
+/// error rather than being passed on.
+pub fn split_editor(value: &str, home: &Path) -> Result<Vec<String>, String> {
+    if value.contains('\n') {
+        return Err("a newline is not supported".into());
+    }
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ' ' || c == '\t' {
+            words.extend(word.take());
+            continue;
+        }
+        let starts_word = word.is_none();
+        let w = word.get_or_insert_with(String::new);
+        match c {
+            '~' if starts_word && matches!(chars.peek(), Some('/')) => {
+                w.push_str(&home.to_string_lossy());
+            }
+            '\\' => w.push(chars.next().ok_or("ends with a lone backslash")?),
+            '\'' => loop {
+                match chars.next() {
+                    Some('\'') => break,
+                    Some(ch) => w.push(ch),
+                    None => return Err("has an unterminated ' quote".into()),
+                }
+            },
+            '"' => loop {
+                match chars.next() {
+                    Some('"') => break,
+                    Some('$' | '`') => {
+                        return Err("expansion ($ or `) inside quotes is not supported".into());
+                    }
+                    Some('\\') if matches!(chars.peek(), Some('"' | '\\')) => {
+                        w.extend(chars.next());
+                    }
+                    Some(ch) => w.push(ch),
+                    None => return Err("has an unterminated \" quote".into()),
+                }
+            },
+            '$' | '`' | ';' | '&' | '|' | '<' | '>' | '(' | ')' | '{' | '}' | '*' | '?' | '['
+            | ']' | '!' | '#' => {
+                return Err(format!(
+                    "{c:?} needs a shell; bupr runs the editor directly (quote it if it is part of a path)"
+                ));
+            }
+            _ => w.push(c),
+        }
+    }
+    words.extend(word);
+    if words.is_empty() {
+        return Err("is empty".into());
+    }
+    Ok(words)
 }
 
 fn cmd_new(cli: &Cli, config_path: &Path) -> i32 {
@@ -439,5 +522,107 @@ fn cmd_new(cli: &Cli, config_path: &Path) -> i32 {
             eprintln!("✗ {e}");
             2
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_editor;
+    use std::path::Path;
+
+    fn split(s: &str) -> Result<Vec<String>, String> {
+        split_editor(s, Path::new("/Users/me"))
+    }
+
+    fn ok(s: &str) -> Vec<String> {
+        split(s).unwrap_or_else(|e| panic!("{s:?}: {e}"))
+    }
+
+    #[test]
+    fn common_editors_split_into_words() {
+        assert_eq!(ok("vim"), ["vim"]);
+        assert_eq!(ok("code --wait"), ["code", "--wait"]);
+        assert_eq!(ok("  subl\t-w  "), ["subl", "-w"]);
+        assert_eq!(
+            ok("'/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl' -w"),
+            [
+                "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl",
+                "-w"
+            ]
+        );
+        assert_eq!(
+            ok("\"/Applications/My Editor.app/bin/ed\" --new-window"),
+            ["/Applications/My Editor.app/bin/ed", "--new-window"]
+        );
+        assert_eq!(
+            ok(r"/Applications/Sublime\ Text.app/bin/subl"),
+            ["/Applications/Sublime Text.app/bin/subl"]
+        );
+        assert_eq!(ok("emacsclient -a ''"), ["emacsclient", "-a", ""]);
+        assert_eq!(ok("vim -c 'set tw=0'"), ["vim", "-c", "set tw=0"]);
+        assert_eq!(ok(r#"ed "a\"b\\c""#), ["ed", r#"a"b\c"#]);
+        assert_eq!(ok("'it''s'"), ["its"]);
+    }
+
+    #[test]
+    fn a_leading_tilde_slash_is_home() {
+        assert_eq!(ok("~/bin/ed -x"), ["/Users/me/bin/ed", "-x"]);
+        assert_eq!(ok("ed ~/x"), ["ed", "/Users/me/x"]);
+        assert_eq!(ok("'~/bin/ed'"), ["~/bin/ed"]);
+        assert_eq!(ok("''~/bin/ed"), ["~/bin/ed"]);
+        assert_eq!(ok("a~/b"), ["a~/b"]);
+        assert_eq!(ok("~user"), ["~user"]);
+    }
+
+    #[test]
+    fn quoted_metacharacters_are_literal() {
+        assert_eq!(ok("'vi; touch x'"), ["vi; touch x"]);
+        assert_eq!(ok("\"a|b&c(d)*?[e]!#\""), ["a|b&c(d)*?[e]!#"]);
+        assert_eq!(ok(r"vi\;x \$HOME"), ["vi;x", "$HOME"]);
+        assert_eq!(ok("'$(touch x)'"), ["$(touch x)"]);
+    }
+
+    #[test]
+    fn shell_syntax_and_injection_are_refused() {
+        for bad in [
+            "vi; touch x",
+            "vi;touch x",
+            "$(touch x)",
+            "vi `id`",
+            "vi $HOME",
+            "${EDITOR}",
+            "vi && touch x",
+            "vi & touch x",
+            "vi | tee x",
+            "vi > x",
+            "vi < x",
+            "(vi)",
+            "{ vi; }",
+            "vi *",
+            "vi ?",
+            "vi [ab]",
+            "!vi",
+            "vi # comment",
+            "vi\ntouch x",
+            "vi\\\ntouch x",
+            "'vi\ntouch x'",
+            "\"$(touch x)\"",
+            "\"`id`\"",
+            "vi \"$HOME\"",
+        ] {
+            assert!(
+                split(bad).is_err(),
+                "{bad:?} was accepted: {:?}",
+                split(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_and_unterminated_values_are_refused() {
+        for bad in ["", "   ", "\t", "'vi", "\"vi", "vi 'x", "vi \\"] {
+            assert!(split(bad).is_err(), "{bad:?} was accepted");
+        }
+        assert!(split("vi; x").unwrap_err().contains("';'"));
     }
 }

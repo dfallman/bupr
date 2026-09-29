@@ -171,7 +171,7 @@ fn deletion_limit_is_reported_and_skipping_is_honoured() {
 }
 
 #[test]
-fn copy_errors_disable_deletions() {
+fn copy_errors_do_not_block_unrelated_deletions() {
     let fx = Fx::new();
     write(&fx.src, "ok.txt", b"ok");
     run(&fx, &fx.preset());
@@ -181,9 +181,29 @@ fn copy_errors_disable_deletions() {
     let r = run(&fx, &fx.preset());
     assert_eq!(r.stats.outcome, Outcome::Errors);
     assert!(r.stats.errors.iter().any(|e| e.path == "locked.txt"));
+    assert!(!fx.dst.join("extra.txt").exists());
+    assert_eq!(r.stats.deleted, 1);
+}
+
+#[test]
+fn an_unreadable_source_folder_keeps_its_backup() {
+    let fx = Fx::new();
+    write(&fx.src, "ok.txt", b"ok");
+    write(&fx.src, "private/notes.txt", b"n");
+    write(&fx.src, "gone.txt", b"g");
+    run(&fx, &fx.preset());
+    fs::remove_file(fx.src.join("gone.txt")).unwrap();
+    chmod(&fx.src.join("private"), 0o000);
+    let r = run(&fx, &fx.preset());
+    chmod(&fx.src.join("private"), 0o755);
+    assert_eq!(r.stats.outcome, Outcome::Errors, "{:?}", r.stats);
+    assert!(r.stats.errors.iter().any(|e| e.path == "private"));
+    // The folder's mode (000) is mirrored; its contents are kept.
+    chmod(&fx.dst.join("private"), 0o755);
+    assert_eq!(fs::read(fx.dst.join("private/notes.txt")).unwrap(), b"n");
     assert!(
-        fx.dst.join("extra.txt").exists(),
-        "deletions must be skipped after a copy error"
+        !fx.dst.join("gone.txt").exists(),
+        "unrelated deletions still run"
     );
 }
 
@@ -365,6 +385,238 @@ fn type_swaps_between_runs() {
     assert_eq!(r.stats.outcome, Outcome::Ok, "{:?}", r.stats);
     assert_eq!(fs::read(fx.dst.join("x/child")).unwrap(), b"now a dir");
     assert_eq!(fs::read(fx.dst.join("y")).unwrap(), b"now a file");
+}
+
+fn no_temp_files(fx: &Fx) -> bool {
+    files(&fx.dst).iter().all(|f| !f.contains(".bupr-tmp-"))
+}
+
+#[test]
+fn an_interrupted_type_change_keeps_the_old_version() {
+    let fx = Fx::new();
+    write(&fx.src, "x", b"old file");
+    write(&fx.src, "y/inner", b"old tree");
+    write(&fx.src, "z", b"z");
+    run(&fx, &fx.preset());
+    fs::remove_file(fx.src.join("x")).unwrap();
+    write(&fx.src, "x/a", b"new tree");
+    write(&fx.src, "x/b", b"new tree");
+    fs::remove_dir_all(fx.src.join("y")).unwrap();
+    write(&fx.src, "y", b"new file");
+    write(&fx.src, "z", b"z2");
+    let cancel = AtomicBool::new(false);
+    let r = run_with(
+        &fx,
+        &fx.preset(),
+        &RunOptions::default(),
+        proceed(),
+        &cancel,
+        &mut |e| {
+            if matches!(e, Event::FileDone { path } if path == "y") {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        },
+    );
+    assert_eq!(r.stats.outcome, Outcome::Interrupted, "{:?}", r.stats);
+    assert_eq!(fs::read(fx.dst.join("x")).unwrap(), b"old file");
+    assert_eq!(fs::read(fx.dst.join("y/inner")).unwrap(), b"old tree");
+    assert!(no_temp_files(&fx));
+    let r = run(&fx, &fx.preset());
+    assert_eq!(r.stats.outcome, Outcome::Ok, "{:?}", r.stats);
+    assert_eq!(fs::read(fx.dst.join("x/b")).unwrap(), b"new tree");
+    assert_eq!(fs::read(fx.dst.join("y")).unwrap(), b"new file");
+    assert!(no_temp_files(&fx));
+}
+
+#[test]
+fn a_replacement_that_fails_to_copy_keeps_the_old_version() {
+    let fx = Fx::new();
+    write(&fx.src, "y/inner", b"old tree");
+    run(&fx, &fx.preset());
+    fs::remove_dir_all(fx.src.join("y")).unwrap();
+    write(&fx.src, "y", b"unreadable new file");
+    chmod(&fx.src.join("y"), 0o000);
+    let r = run(&fx, &fx.preset());
+    chmod(&fx.src.join("y"), 0o644);
+    assert_eq!(r.stats.outcome, Outcome::Errors, "{:?}", r.stats);
+    assert_eq!(fs::read(fx.dst.join("y/inner")).unwrap(), b"old tree");
+    assert_eq!(r.stats.deleted, 0);
+    assert!(no_temp_files(&fx));
+}
+
+#[test]
+fn read_only_files_are_copied() {
+    let fx = Fx::new();
+    write(&fx.src, "ro.txt", b"ro");
+    chmod(&fx.src.join("ro.txt"), 0o444);
+    let r = run(&fx, &fx.preset());
+    assert_eq!(r.stats.outcome, Outcome::Ok, "{:?}", r.stats);
+    assert_eq!(fs::read(fx.dst.join("ro.txt")).unwrap(), b"ro");
+    assert_eq!(
+        fs::metadata(fx.dst.join("ro.txt")).unwrap().mode() & 0o777,
+        0o444
+    );
+    assert!(no_temp_files(&fx));
+}
+
+#[test]
+fn a_replaced_folder_that_gained_entries_still_gets_the_new_version() {
+    let fx = Fx::new();
+    write(&fx.src, "x/a", b"old");
+    write(&fx.src, "z", b"z");
+    run(&fx, &fx.preset());
+    fs::remove_dir_all(fx.src.join("x")).unwrap();
+    write(&fx.src, "x", b"new file");
+    write(&fx.src, "z", b"z2");
+    let dst = fx.dst.clone();
+    let r = run_with(
+        &fx,
+        &fx.preset(),
+        &RunOptions::default(),
+        proceed(),
+        &AtomicBool::new(false),
+        &mut |e| {
+            if matches!(e, Event::FileStart { path, .. } if path == "z") {
+                fs::write(dst.join("x/created-since-scan"), b"?").unwrap();
+            }
+        },
+    );
+    assert_eq!(r.stats.outcome, Outcome::Ok, "{:?}", r.stats);
+    assert_eq!(fs::read(fx.dst.join("x")).unwrap(), b"new file");
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e, Event::Warning { message } if message.contains("left in")))
+    );
+    // The set-aside old version is cleaned up by the next run.
+    run(&fx, &fx.preset());
+    assert!(no_temp_files(&fx));
+}
+
+#[test]
+fn a_type_change_counts_toward_the_delete_limit() {
+    let fx = Fx::new();
+    write(&fx.src, "big.bin", &[1u8; 5000]);
+    run(&fx, &fx.preset());
+    fs::remove_file(fx.src.join("big.bin")).unwrap();
+    symlink("elsewhere", &fx.src, "big.bin");
+    let mut p = fx.preset();
+    p.max_delete_bytes = 1000;
+    let r = run_with(
+        &fx,
+        &p,
+        &RunOptions::default(),
+        Decision::Proceed {
+            allow_deletes: false,
+            adopt: false,
+        },
+        &AtomicBool::new(false),
+        &mut |_| {},
+    );
+    let s = r.summary.unwrap();
+    assert!(s.over_delete_limit);
+    assert_eq!(s.totals.delete_bytes, 5000);
+    assert_eq!(fs::read(fx.dst.join("big.bin")).unwrap(), [1u8; 5000]);
+    let r = run(&fx, &p);
+    assert_eq!(r.stats.outcome, Outcome::Ok, "{:?}", r.stats);
+    assert_eq!(
+        fs::read_link(fx.dst.join("big.bin")).unwrap().to_str(),
+        Some("elsewhere")
+    );
+}
+
+#[test]
+fn a_source_file_swapped_for_a_symlink_after_the_scan_is_not_followed() {
+    let fx = Fx::new();
+    write(&fx.src, "a.txt", b"a");
+    write(&fx.src, "b.txt", b"b");
+    let (src, outside) = (fx.src.clone(), fx.outside.clone());
+    let r = run_with(
+        &fx,
+        &fx.preset(),
+        &RunOptions::default(),
+        proceed(),
+        &AtomicBool::new(false),
+        &mut |e| {
+            if matches!(e, Event::FileStart { path, .. } if path == "a.txt") {
+                fs::remove_file(src.join("b.txt")).unwrap();
+                std::os::unix::fs::symlink(outside.join("precious.txt"), src.join("b.txt"))
+                    .unwrap();
+            }
+        },
+    );
+    assert_eq!(r.stats.outcome, Outcome::Errors, "{:?}", r.stats);
+    let err = r.stats.errors.iter().find(|e| e.path == "b.txt").unwrap();
+    assert!(err.message.contains("changed since the scan"), "{err:?}");
+    assert!(!fx.dst.join("b.txt").exists());
+}
+
+#[test]
+fn metadata_only_changes_reach_the_backup() {
+    let fx = Fx::new();
+    let vol = bupr::preflight::volume(&fx.root);
+    if !(vol.nanos && vol.modes && vol.xattrs) {
+        eprintln!("skipping: temp volume is not APFS");
+        return;
+    }
+    write(&fx.src, "a.txt", b"one");
+    let a = fx.src.join("a.txt");
+    let t = std::time::UNIX_EPOCH + std::time::Duration::new(1_600_000_000, 100);
+    let set = |t| {
+        fs::File::open(&a)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(t))
+            .unwrap()
+    };
+    set(t);
+    run(&fx, &fx.preset());
+    // Same size, same second: only the nanoseconds differ.
+    fs::write(&a, b"two").unwrap();
+    set(t + std::time::Duration::from_nanos(1));
+    let r = run(&fx, &fx.preset());
+    assert_eq!(r.stats.copied_files, 1);
+    assert_eq!(fs::read(fx.dst.join("a.txt")).unwrap(), b"two");
+    chmod(&a, 0o600);
+    assert_eq!(run(&fx, &fx.preset()).stats.copied_files, 1);
+    assert_eq!(
+        fs::metadata(fx.dst.join("a.txt")).unwrap().mode() & 0o777,
+        0o600
+    );
+    xattr::set(&a, "com.example.tag", b"red").unwrap();
+    assert_eq!(run(&fx, &fx.preset()).stats.copied_files, 1);
+    assert_eq!(
+        xattr::get(fx.dst.join("a.txt"), "com.example.tag").unwrap(),
+        Some(b"red".to_vec())
+    );
+    assert_eq!(run(&fx, &fx.preset()).stats.copied_files, 0);
+}
+
+#[test]
+fn the_destination_root_mode_is_restored() {
+    let fx = Fx::new();
+    write(&fx.src, "a.txt", b"a");
+    run(&fx, &fx.preset());
+    chmod(&fx.dst, 0o555);
+    write(&fx.src, "b.txt", b"b");
+    let r = run(&fx, &fx.preset());
+    assert_eq!(r.stats.outcome, Outcome::Ok, "{:?}", r.stats);
+    assert!(fx.dst.join("b.txt").exists());
+    assert_eq!(fs::metadata(&fx.dst).unwrap().mode() & 0o777, 0o555);
+}
+
+#[test]
+fn skipped_special_files_are_reported_on_a_real_run() {
+    let fx = Fx::new();
+    write(&fx.src, "a.txt", b"a");
+    let fifo = std::ffi::CString::new(fx.src.join("pipe").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    let r = run(&fx, &fx.preset());
+    assert_eq!(r.stats.outcome, Outcome::Ok);
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e, Event::Warning { message } if message.contains("special file")))
+    );
 }
 
 #[test]

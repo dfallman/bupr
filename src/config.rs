@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::preflight;
 use crate::rules::{Filter, RulePack};
 
 pub const RESERVED_NAMES: &[&str] = &[
@@ -75,6 +76,8 @@ struct RawPreset {
     secrets: Vec<String>,
     #[serde(default)]
     allow_internal: bool,
+    #[serde(default)]
+    secrets_require_encryption: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -90,6 +93,9 @@ pub struct Preset {
     pub max_delete_bytes: u64,
     pub secrets: Vec<String>,
     pub allow_internal: bool,
+    /// Ask (or, unattended, abort) before copying secret files to a drive
+    /// that is not known to be encrypted (AUD-M5).
+    pub secrets_require_encryption: bool,
 }
 
 impl Preset {
@@ -106,6 +112,7 @@ impl Preset {
             max_delete_bytes: parse_size(DEFAULT_MAX_DELETE_SIZE).expect("default size parses"),
             secrets: Vec::new(),
             allow_internal: false,
+            secrets_require_encryption: false,
         }
     }
 
@@ -151,6 +158,7 @@ impl Preset {
             max_delete_bytes,
             secrets: raw.secrets,
             allow_internal: raw.allow_internal,
+            secrets_require_encryption: raw.secrets_require_encryption,
         };
         preset.filter().map_err(invalid)?;
         Ok(preset)
@@ -174,25 +182,30 @@ impl Config {
             .map(|(name, rp)| Preset::from_raw(name, rp, home))
             .collect::<Result<Vec<_>, _>>()?;
         // A mirror deletes everything it does not own, so two presets must
-        // never share or nest destinations.
+        // never share or nest destinations, however their paths are spelled.
+        let keys: Vec<String> = presets
+            .iter()
+            .map(|p| preflight::dest_key(&p.destination))
+            .collect();
         for (i, b) in presets.iter().enumerate() {
-            for a in &presets[..i] {
-                if a.destination.starts_with(&b.destination)
-                    || b.destination.starts_with(&a.destination)
-                {
-                    return Err(ConfigError::Invalid {
-                        preset: b.name.clone(),
-                        message: format!(
-                            "destination {} overlaps the destination of preset \"{}\" ({})",
-                            b.destination.display(),
-                            a.name,
-                            a.destination.display()
-                        ),
-                    });
-                }
+            if let Some(j) = (0..i).find(|&j| preflight::keys_overlap(&keys[i], &keys[j])) {
+                return Err(overlap_error(b, &presets[j]));
             }
         }
         Ok(Config { presets })
+    }
+
+    /// Another preset whose destination is, or holds, or lies inside this
+    /// one's, checked again at the start of a run (AUD-H6).
+    pub fn check_overlap(&self, preset: &Preset) -> Result<(), ConfigError> {
+        let key = preflight::dest_key(&preset.destination);
+        match self.presets.iter().find(|o| {
+            o.name != preset.name
+                && preflight::keys_overlap(&key, &preflight::dest_key(&o.destination))
+        }) {
+            Some(o) => Err(overlap_error(preset, o)),
+            None => Ok(()),
+        }
     }
 
     pub fn load(path: &Path, home: &Path) -> Result<Config, ConfigError> {
@@ -205,6 +218,18 @@ impl Config {
 
     pub fn get(&self, name: &str) -> Option<&Preset> {
         self.presets.iter().find(|p| p.name == name)
+    }
+}
+
+fn overlap_error(b: &Preset, a: &Preset) -> ConfigError {
+    ConfigError::Invalid {
+        preset: b.name.clone(),
+        message: format!(
+            "destination {} overlaps the destination of preset \"{}\" ({})",
+            b.destination.display(),
+            a.name,
+            a.destination.display()
+        ),
     }
 }
 
@@ -387,6 +412,33 @@ mod tests {
         let ok =
             format!("{base}[presets.media]\nsource=\"/m\"\ndestination=\"/Volumes/B/devices\"\n");
         assert!(parse(&ok).is_ok());
+    }
+
+    #[test]
+    fn destinations_that_are_one_folder_by_another_name_are_rejected() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().canonicalize().unwrap();
+        crate::testutil::mkdir(&root, "real");
+        crate::testutil::symlink(root.join("real").to_str().unwrap(), &root, "link");
+        let mut others = vec![root.join("link/dev").display().to_string()];
+        if preflight::is_case_insensitive(&root) {
+            others.push(root.join("REAL/Dev").display().to_string());
+        }
+        for other in others {
+            let text = format!(
+                "[presets.dev]\nsource=\"/a\"\ndestination={:?}\n\
+                 [presets.media]\nsource=\"/m\"\ndestination={other:?}\n",
+                root.join("real/dev").display().to_string()
+            );
+            let e = parse(&text).unwrap_err();
+            assert!(e.to_string().contains("overlaps"), "{other}: {e}");
+        }
+        let c = parse("[presets.dev]\nsource=\"/a\"\ndestination=\"/Volumes/B/dev\"\n").unwrap();
+        let mut late = Preset::minimal("media", "/m".into(), "/Volumes/B/dev/m".into());
+        assert!(c.check_overlap(&late).is_err());
+        late.destination = "/Volumes/B/media".into();
+        assert!(c.check_overlap(&late).is_ok());
+        assert!(c.check_overlap(c.get("dev").unwrap()).is_ok());
     }
 
     #[test]

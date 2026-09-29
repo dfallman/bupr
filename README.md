@@ -102,11 +102,12 @@ Only `source` and `destination` are required.
 | `destination` | *(required)* | The backup folder. It must be a subfolder on a mounted drive, never a volume root. |
 | `rules` | `["junk"]` | Built-in rule packs: `dev`, `junk`, or `[]` to copy everything. |
 | `exclude` | `[]` | Extra globs to skip, in gitignore style (see below). |
-| `include` | `[]` | Globs that are always backed up, even if a rule or exclude matches them. |
+| `include` | `[]` | Globs that are always backed up, even if a rule or exclude matches them. Only reaches inside an excluded folder that it names (see below). |
 | `max_delete` | `200` | Ask before deleting more entries than this in one run. |
 | `max_delete_size` | `"10 GB"` | Ask before deleting more data than this in one run. |
 | `secrets` | `[]` | Extra secret-file globs, used for the unencrypted-drive warning. |
 | `allow_internal` | `false` | Allow a destination on the internal disk. |
+| `secrets_require_encryption` | `false` | Ask before copying secret files to a drive that is not known to be encrypted. Unattended runs abort instead. |
 
 Unknown keys are an error, so a typo such as `exlude` can't silently turn
 off an exclude.
@@ -117,6 +118,13 @@ off an exclude.
 - `**` matches any depth.
 - A leading `/`, or a `/` in the middle, anchors the pattern to the source
   folder. Any other pattern matches at any depth.
+- As in `.gitignore`, an `include` only looks inside an excluded folder
+  when it names that folder, so excluded folders are never read in full just
+  to find a match. An anchored pattern such as `/node_modules/keep.txt`
+  reaches inside the excluded `node_modules`, and
+  `**/node_modules/keep.txt` does so at any depth. A pattern without a
+  slash, such as `*.keep`, keeps matching files everywhere else but does not
+  look inside `node_modules/`, `target/` or other excluded folders.
 
 ### Rule packs
 
@@ -170,8 +178,10 @@ choice), `--quiet`, `--no-color`.
    destination is safe to use (see below). If the drive isn't mounted it
    stops with *"drive not mounted"*. It never quietly creates the folder on
    your internal disk instead.
-2. **Scan and plan.** bupr compares size and modification time to the
-   second. Only new and changed files are copied. Files that no longer
+2. **Scan and plan.** bupr compares size and modification time. On an
+   APFS or HFS+ destination it also compares permissions and extended
+   attributes (such as Finder tags), and on APFS the modification time to
+   the nanosecond. Only new and changed files are copied. Files that no longer
    exist in the source, or that are now excluded, are deleted from the
    backup. The destination ends up as an exact mirror.
 3. **Confirm, only when needed.** bupr asks before it:
@@ -179,14 +189,23 @@ choice), `--quiet`, `--no-color`.
    - uses a folder it didn't create,
    - starts with too little free space.
 
-   If secret files such as `.env` or keys are about to be copied to an
-   unencrypted drive, it prints a warning.
-4. **Copy.** Files are copied through a temporary name and renamed into
-   place, so an interrupted copy never leaves a half-written file behind.
-   Permissions, modification times and extended attributes are preserved.
-   Symlinks are copied as links and never followed.
-5. **Delete, then finalize.** Deletions run only after every copy has
-   succeeded. If anything failed, nothing is deleted in that run.
+   If secret files such as `.env` or keys are about to be copied to a drive
+   that is not known to be encrypted, it prints a warning (and asks, with
+   `secrets_require_encryption`).
+4. **Copy.** Files are copied by the kernel (`copyfile`, or a clone when
+   source and backup share an APFS volume) to a temporary name, flushed,
+   and renamed into place, so an interrupted copy never leaves a
+   half-written file behind. Permissions, modification times and extended
+   attributes are preserved, sparse files stay sparse and compressed files
+   stay compressed. Symlinks are copied as links and never followed, and a
+   source file that changed into a link since the scan is not copied.
+   When an entry changes type (a file becomes a folder, say), the new one
+   is built under a temporary name and only then takes the old one's
+   place.
+5. **Delete, then finalize.** Deletions run after the copy phase. A source
+   file or folder that could not be read keeps its existing backup, so a
+   read error never looks like a deletion. At the end the drive's cache is
+   flushed once.
 
 Every run is recorded in `~/.local/state/bupr/history.jsonl`, which respects
 `$XDG_STATE_HOME`. `bupr log` and the menu read from it.
@@ -214,6 +233,9 @@ Ctrl-C stops a run cleanly after the current chunk. The partial file is
 removed and nothing is deleted. Press Ctrl-C a second time to quit
 immediately.
 
+Only one run at a time can use a destination: a second `bupr` for the same
+folder (a manual run overlapping launchd, say) stops with exit code 2.
+
 ## Safety
 
 bupr writes only inside the running preset's destination folder. It
@@ -222,8 +244,10 @@ The one exception is its own config and history files. Independent layers
 enforce this:
 
 - **Kernel sandbox.** The copying runs in a separate worker process under
-  a macOS sandbox profile, which lets it write only to the destination.
-  Dry runs and simulations deny all writes.
+  a macOS sandbox profile, which lets it write only to the destination,
+  read file contents only in the source, the destination and system
+  libraries, and never use the network. Dry runs and simulations deny all
+  writes.
 - **Capability-based file access.** All writes go through a
   [`cap-std`](https://github.com/bytecodealliance/cap-std) handle on the
   destination folder. That handle refuses `..`, absolute paths, and
@@ -232,11 +256,12 @@ enforce this:
 - **Compile-time ban.** Clippy forbids every file-writing API outside two
   small modules, and a test checks that no other module opts out.
 - **Destination checks.** bupr refuses a destination that:
-  - is a system folder,
+  - is a system folder or inside one (`/usr/local`, `/Library/…`),
   - is your home folder or one of its parents,
   - is a bare volume root,
   - is on a drive that isn't mounted,
-  - overlaps the source or another preset's destination.
+  - overlaps the source or another preset's destination, however the
+    paths are spelled (symlinks, case).
 - **Ownership marker.** bupr only mirror-deletes inside a folder that holds
   its `.bupr-dest` marker for that preset. It never deletes a folder that
   belongs to another preset.
@@ -244,6 +269,8 @@ enforce this:
   with Unicode normalization and full case folding, so `README.md` →
   `Readme.md` or `strasse` → `straße` is treated as a rename. Before each
   deletion, bupr also checks the file's identity once more.
+- **Other filesystems are left alone.** A disk image or volume mounted
+  inside the destination is never written to or deleted.
 
 The test suite checks all of this. It includes adversarial tests for
 symlink escapes, a folder swapped mid-run, hostile file names and a drive
@@ -259,7 +286,8 @@ the destination is byte-identical afterwards.
 - Mirror mode only: a file deleted from the source is also deleted from the
   backup. Pair bupr with Time Machine or snapshots if you need to go back
   in time.
-- Changes are detected by size and modification time, not checksums.
+- Changes are detected by size, modification time and (on APFS and HFS+)
+  permissions and extended attributes, not checksums.
 - Hard links are copied as separate files. ACLs and ownership are not
   copied.
 

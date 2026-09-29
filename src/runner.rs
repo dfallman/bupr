@@ -29,6 +29,8 @@ pub trait Prompter {
     fn adopt(&mut self, preset: &Preset, s: &PlanSummary) -> bool;
     fn deletions(&mut self, preset: &Preset, s: &PlanSummary) -> DeleteChoice;
     fn low_space(&mut self, preset: &Preset, s: &PlanSummary) -> bool;
+    /// Copy secret files to a drive that is not known to be encrypted?
+    fn secrets(&mut self, preset: &Preset, s: &PlanSummary) -> bool;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,13 +51,23 @@ pub struct Ctx {
     pub verbose: bool,
 }
 
+/// Whether the run must ask before copying secret files: the preset wants
+/// them only on encrypted drives, and this one is not known to be (AUD-M5).
+pub fn secrets_need_consent(s: &PlanSummary, preset: &Preset, encrypted: Option<bool>) -> bool {
+    preset.secrets_require_encryption && s.secret_files > 0 && encrypted != Some(true)
+}
+
 /// Spec §6 step 5. Unattended runs always take the safe option.
 pub fn decide(
     s: &PlanSummary,
     preset: &Preset,
     unattended: bool,
+    encrypted: Option<bool>,
     prompter: &mut dyn Prompter,
 ) -> Decision {
+    if secrets_need_consent(s, preset, encrypted) && (unattended || !prompter.secrets(preset, s)) {
+        return Decision::Abort;
+    }
     let mut adopt = false;
     if s.marker.needs_adoption() {
         if unattended || !prompter.adopt(preset, s) {
@@ -186,6 +198,40 @@ fn execute_one(ctx: &Ctx, preset: &Preset, sandbox: bool, prompter: &mut dyn Pro
         Ok(r) => r,
         Err(e) => return failed(ctx.mode, Outcome::PreflightFailed, e.to_string()),
     };
+    // Paths may resolve differently now than when the config was parsed.
+    if let Err(e) = ctx.config.check_overlap(preset) {
+        return failed(ctx.mode, Outcome::PreflightFailed, e.to_string());
+    }
+    // One run per destination at a time (AUD-H7). Held until this returns,
+    // after the worker has exited.
+    let _lock = if ctx.mode == Mode::Run {
+        let dir = ctx
+            .history_path
+            .parent()
+            .map_or_else(|| PathBuf::from("locks"), |p| p.join("locks"));
+        match state::lock_destination(&dir, &preflight::dest_key(&resolved.dest)) {
+            Ok(Some(l)) => Some(l),
+            Ok(None) => {
+                return failed(
+                    ctx.mode,
+                    Outcome::Aborted,
+                    format!(
+                        "another bupr run is already using {}",
+                        tilde(&resolved.dest, &ctx.env.home)
+                    ),
+                );
+            }
+            Err(e) => {
+                return failed(
+                    ctx.mode,
+                    Outcome::Aborted,
+                    format!("cannot take the lock in {}: {e}", dir.display()),
+                );
+            }
+        }
+    } else {
+        None
+    };
     if !ctx.quiet {
         println!(
             "bupr · {}  {} → {}",
@@ -194,15 +240,19 @@ fn execute_one(ctx: &Ctx, preset: &Preset, sandbox: bool, prompter: &mut dyn Pro
             tilde(&resolved.dest, &ctx.env.home)
         );
     }
-    let encrypted = if ctx.mode == Mode::Run {
-        preflight::mount_point(&resolved.dest).and_then(|m| preflight::is_encrypted(&m))
-    } else {
+    let encrypted = if ctx.mode == Mode::Simulate {
         None
+    } else {
+        preflight::mount_point(&resolved.dest).and_then(|m| preflight::is_encrypted(&m))
     };
-    let profile = sandbox.then(|| match ctx.mode {
-        Mode::Run => worker::sandbox_profile(Some(&resolved.dest), &resolved.missing_ancestors),
-        Mode::DryRun | Mode::Simulate => worker::sandbox_profile(None, &[]),
+    let profile = sandbox.then(|| {
+        let (r, write) = (&resolved, ctx.mode == Mode::Run);
+        worker::sandbox_profile(&r.source, &r.dest, &r.missing_ancestors, write)
     });
+    let profile = match profile.transpose() {
+        Ok(p) => p,
+        Err(e) => return failed(ctx.mode, Outcome::PreflightFailed, e),
+    };
     let init = WorkerInit {
         preset: preset.clone(),
         opts: RunOptions {
@@ -244,21 +294,30 @@ fn execute_one(ctx: &Ctx, preset: &Preset, sandbox: bool, prompter: &mut dyn Pro
                         view.note(&plain::planned_line(summary));
                     }
                 }
-                if summary.secret_files > 0 && encrypted == Some(false) {
+                // Unknown counts as unencrypted: the warning fails closed (AUD-M5).
+                if summary.secret_files > 0 && ctx.mode != Mode::Simulate && encrypted != Some(true)
+                {
+                    let drive = if encrypted == Some(false) {
+                        "an unencrypted drive"
+                    } else {
+                        "a drive that is not known to be encrypted"
+                    };
                     view.alert(
                         &format!(
-                            "{} secret file(s) (.env, keys) will be copied to an unencrypted drive",
+                            "{} secret file(s) (.env, keys) will be copied to {drive}",
                             count(summary.secret_files)
                         ),
                         ctx.color,
                     );
                 }
                 if ctx.mode != Mode::DryRun {
-                    let ask = !ctx.unattended && summary.needs_prompt();
+                    let ask = !ctx.unattended
+                        && (summary.needs_prompt()
+                            || secrets_need_consent(summary, preset, encrypted));
                     if ask {
                         view.suspend();
                     }
-                    let d = decide(summary, preset, ctx.unattended, prompter);
+                    let d = decide(summary, preset, ctx.unattended, encrypted, prompter);
                     if ask {
                         view.resume();
                     }
@@ -378,6 +437,7 @@ mod tests {
         adopt: bool,
         delete: DeleteChoice,
         space: bool,
+        secrets: bool,
         asked: Vec<&'static str>,
     }
 
@@ -394,6 +454,10 @@ mod tests {
             self.asked.push("space");
             self.space
         }
+        fn secrets(&mut self, _: &Preset, _: &PlanSummary) -> bool {
+            self.asked.push("secrets");
+            self.secrets
+        }
     }
 
     fn fake() -> Fake {
@@ -401,6 +465,7 @@ mod tests {
             adopt: true,
             delete: DeleteChoice::Delete,
             space: true,
+            secrets: true,
             asked: vec![],
         }
     }
@@ -419,6 +484,7 @@ mod tests {
             largest_deletes: vec![],
             skipped_special: 0,
             skipped_mounts: 0,
+            dest_mounts: 0,
             collisions: 0,
             scan_errors: 0,
             case_insensitive: true,
@@ -437,7 +503,7 @@ mod tests {
     #[test]
     fn clean_plan_proceeds_without_asking() {
         let mut f = fake();
-        assert_eq!(decide(&summary(), &preset(), false, &mut f), GO);
+        assert_eq!(decide(&summary(), &preset(), false, None, &mut f), GO);
         assert!(f.asked.is_empty());
     }
 
@@ -445,9 +511,12 @@ mod tests {
     fn foreign_destination() {
         let mut s = summary();
         s.marker = MarkerStatus::Foreign;
-        assert_eq!(decide(&s, &preset(), true, &mut fake()), Decision::Abort);
         assert_eq!(
-            decide(&s, &preset(), false, &mut fake()),
+            decide(&s, &preset(), true, None, &mut fake()),
+            Decision::Abort
+        );
+        assert_eq!(
+            decide(&s, &preset(), false, None, &mut fake()),
             Decision::Proceed {
                 allow_deletes: true,
                 adopt: true
@@ -455,7 +524,7 @@ mod tests {
         );
         let mut no = fake();
         no.adopt = false;
-        assert_eq!(decide(&s, &preset(), false, &mut no), Decision::Abort);
+        assert_eq!(decide(&s, &preset(), false, None, &mut no), Decision::Abort);
     }
 
     #[test]
@@ -466,24 +535,51 @@ mod tests {
             allow_deletes: false,
             adopt: false,
         };
-        assert_eq!(decide(&s, &preset(), true, &mut fake()), skip);
+        assert_eq!(decide(&s, &preset(), true, None, &mut fake()), skip);
         let mut f = fake();
         f.delete = DeleteChoice::Skip;
-        assert_eq!(decide(&s, &preset(), false, &mut f), skip);
+        assert_eq!(decide(&s, &preset(), false, None, &mut f), skip);
         f.delete = DeleteChoice::Abort;
-        assert_eq!(decide(&s, &preset(), false, &mut f), Decision::Abort);
+        assert_eq!(decide(&s, &preset(), false, None, &mut f), Decision::Abort);
         f.delete = DeleteChoice::Delete;
-        assert_eq!(decide(&s, &preset(), false, &mut f), GO);
+        assert_eq!(decide(&s, &preset(), false, None, &mut f), GO);
     }
 
     #[test]
     fn low_space() {
         let mut s = summary();
         s.insufficient_space = true;
-        assert_eq!(decide(&s, &preset(), true, &mut fake()), Decision::Abort);
-        assert_eq!(decide(&s, &preset(), false, &mut fake()), GO);
+        assert_eq!(
+            decide(&s, &preset(), true, None, &mut fake()),
+            Decision::Abort
+        );
+        assert_eq!(decide(&s, &preset(), false, None, &mut fake()), GO);
         let mut no = fake();
         no.space = false;
-        assert_eq!(decide(&s, &preset(), false, &mut no), Decision::Abort);
+        assert_eq!(decide(&s, &preset(), false, None, &mut no), Decision::Abort);
+    }
+
+    #[test]
+    fn secrets_on_a_drive_not_known_to_be_encrypted() {
+        let mut s = summary();
+        s.secret_files = 2;
+        let mut p = preset();
+        // Off by default: only the warning.
+        assert_eq!(decide(&s, &p, true, None, &mut fake()), GO);
+        p.secrets_require_encryption = true;
+        assert_eq!(decide(&s, &p, true, Some(true), &mut fake()), GO);
+        for encrypted in [None, Some(false)] {
+            assert_eq!(
+                decide(&s, &p, true, encrypted, &mut fake()),
+                Decision::Abort
+            );
+            let mut f = fake();
+            assert_eq!(decide(&s, &p, false, encrypted, &mut f), GO);
+            assert_eq!(f.asked, ["secrets"]);
+            f.secrets = false;
+            assert_eq!(decide(&s, &p, false, encrypted, &mut f), Decision::Abort);
+        }
+        s.secret_files = 0;
+        assert_eq!(decide(&s, &p, true, None, &mut fake()), GO);
     }
 }

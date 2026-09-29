@@ -44,3 +44,11 @@ pub fn mkfifo(path: &Path) {
     let c = CString::new(path.as_os_str().as_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
 }
+
+/// A file of `hole` unallocated bytes followed by `tail`.
+pub fn sparse(path: &Path, hole: u64, tail: &[u8]) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut f = fs::File::create(path).unwrap();
+    f.seek(SeekFrom::Start(hole)).unwrap();
+    f.write_all(tail).unwrap();
+}

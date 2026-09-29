@@ -175,3 +175,104 @@ fn hostile_file_names_stay_inside() {
     assert!(!std::path::Path::new("pwned").exists());
     fx.assert_outside_untouched();
 }
+
+/// A small disk image mounted at `at`, detached on drop.
+struct Mounted(std::path::PathBuf);
+
+impl Mounted {
+    fn new(image_dir: &std::path::Path, at: &std::path::Path) -> Option<Mounted> {
+        let img = image_dir.join("vol.dmg");
+        let ok = |c: &mut std::process::Command| c.status().is_ok_and(|s| s.success());
+        fs::create_dir_all(at).unwrap();
+        let created = ok(std::process::Command::new("/usr/bin/hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-size",
+                "2m",
+                "-fs",
+                "HFS+",
+                "-volname",
+                "bupr-test",
+            ])
+            .arg(&img));
+        let attached = created
+            && ok(std::process::Command::new("/usr/bin/hdiutil")
+                .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+                .arg(at)
+                .arg(&img));
+        attached.then(|| Mounted(at.to_path_buf()))
+    }
+}
+
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("/usr/bin/hdiutil")
+            .args(["detach", "-quiet", "-force"])
+            .arg(&self.0)
+            .status();
+    }
+}
+
+#[test]
+fn a_filesystem_mounted_inside_the_destination_is_left_alone() {
+    let fx = Fx::new();
+    write(&fx.src, "a.txt", b"a");
+    write(&fx.src, "mnt/new.txt", b"would land on the other disk");
+    run(&fx, &fx.preset());
+    fs::remove_dir_all(fx.dst.join("mnt")).unwrap();
+    let Some(m) = Mounted::new(&fx.root, &fx.dst.join("mnt")) else {
+        eprintln!("skipping: cannot attach a disk image");
+        return;
+    };
+    write(&m.0, "theirs.txt", b"not part of the mirror");
+    let r = run(&fx, &fx.preset());
+    assert_eq!(r.stats.outcome, Outcome::Errors, "{:?}", r.stats);
+    assert!(r.stats.errors.iter().any(|e| e.path == "mnt"));
+    assert_eq!(
+        fs::read(m.0.join("theirs.txt")).unwrap(),
+        b"not part of the mirror"
+    );
+    assert!(!m.0.join("new.txt").exists());
+    let s = r.summary.unwrap();
+    assert_eq!((s.dest_mounts, s.totals.delete_entries), (1, 0));
+    // Gone from the source too: still not deleted.
+    fs::remove_dir_all(fx.src.join("mnt")).unwrap();
+    let r = run(&fx, &fx.preset());
+    assert_eq!(r.stats.deleted, 0);
+    assert!(m.0.join("theirs.txt").exists());
+    fx.assert_outside_untouched();
+}
+
+#[test]
+fn a_destination_that_fills_up_fails_the_copy_instead_of_hanging() {
+    let fx = Fx::new();
+    write(&fx.src, "small.txt", b"fits");
+    write(&fx.src, "big.bin", &vec![7u8; 6 << 20]);
+    let Some(m) = Mounted::new(&fx.root, &fx.root.join("vol")) else {
+        eprintln!("skipping: cannot attach a disk image");
+        return;
+    };
+    let mut p = fx.preset();
+    p.destination = m.0.join("dev");
+    let r = run_with(
+        &fx,
+        &p,
+        &RunOptions::default(),
+        Decision::Proceed {
+            allow_deletes: true,
+            adopt: false,
+        },
+        &AtomicBool::new(false),
+        &mut |_| {},
+    );
+    assert_eq!(r.stats.outcome, Outcome::Errors, "{:?}", r.stats);
+    let err = r.stats.errors.iter().find(|e| e.path == "big.bin").unwrap();
+    assert!(err.message.contains("No space left"), "{err:?}");
+    assert_eq!(fs::read(m.0.join("dev/small.txt")).unwrap(), b"fits");
+    assert!(
+        files(&m.0.join("dev"))
+            .iter()
+            .all(|f| !f.contains(".bupr-tmp-"))
+    );
+}

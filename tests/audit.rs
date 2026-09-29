@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::fs;
 use std::process::Command;
 
 use bupr::audit::audit;
@@ -44,4 +45,30 @@ fn audit_reports_sizes_reasons_and_gitignore_hints() {
     assert_eq!(rep.hints[0].suggestion, "/p/cache/");
     assert_eq!(rep.top_dirs[0].0, "p");
     assert!(rep.included_bytes >= 515);
+}
+
+#[test]
+fn audit_never_runs_programs_a_repo_config_names() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("git not found; skipping");
+        return;
+    }
+    let fx = Fx::new();
+    let marker = fx.root.join("fsmonitor-ran");
+    let hook = fx.root.join("fsmonitor.sh");
+    fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    chmod(&hook, 0o755);
+    write(&fx.src, "p/.gitignore", b"cache/\n");
+    write(&fx.src, "p/cache/blob", &[0u8; 500]);
+    let repo = fx.src.join("p");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
+
+    let rep = audit(&fx.preset(), 100).unwrap();
+
+    assert!(
+        !marker.exists(),
+        "git ran the repo's core.fsmonitor program"
+    );
+    assert_eq!(rep.hints.len(), 1, "{:?}", rep.hints);
 }

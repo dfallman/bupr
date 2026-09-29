@@ -5,6 +5,8 @@
 //! (name + sibling marker) → excluded; otherwise included. `.gitignore` is
 //! never consulted here.
 
+use std::cell::RefCell;
+
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
 
@@ -194,16 +196,55 @@ pub enum Decision {
 
 struct Pattern {
     original: String,
-    /// Normalized glob (anchored, or prefixed with `**/`).
-    glob: String,
     dir_only: bool,
     matcher: GlobMatcher,
+    /// The normalized glob (anchored, or prefixed with `**/`) split at `/`.
+    parts: Vec<Part>,
+}
+
+/// One `/`-separated component of a normalized glob.
+enum Part {
+    /// `**`: any number of components.
+    Any,
+    One(GlobMatcher),
 }
 
 impl Pattern {
     fn matches(&self, rel: &RelPath, is_dir: bool) -> bool {
         (!self.dir_only || is_dir) && self.matcher.is_match(rel.as_str())
     }
+
+    /// Could this pattern match something strictly below `dir`? A leading
+    /// `**` only reaches into `dir` when a trailing run of its components
+    /// matches the start of the rest of the pattern.
+    fn may_match_below(&self, dir: &[&str]) -> bool {
+        match self.parts.split_first() {
+            Some((Part::Any, rest)) => (0..dir.len()).any(|s| open_prefix(rest, &dir[s..])),
+            _ => open_prefix(&self.parts, dir),
+        }
+    }
+}
+
+/// Does `dir` match the first `dir.len()` parts, with at least one part left
+/// for what lies below it? Reaching a `**` matches anything from there on.
+fn open_prefix(parts: &[Part], dir: &[&str]) -> bool {
+    for (i, d) in dir.iter().enumerate() {
+        match parts.get(i) {
+            None => return false,
+            Some(Part::Any) => return true,
+            Some(Part::One(m)) if !m.is_match(d) => return false,
+            Some(Part::One(_)) => {}
+        }
+    }
+    dir.len() < parts.len()
+}
+
+fn glob_matcher(glob: &str, p: &str) -> Result<GlobMatcher, String> {
+    Ok(GlobBuilder::new(glob)
+        .literal_separator(true)
+        .build()
+        .map_err(|e| format!("invalid pattern {p:?}: {e}"))?
+        .compile_matcher())
 }
 
 /// Compile a gitignore-style pattern: trailing `/` = directories only; a
@@ -223,16 +264,18 @@ fn compile_pattern(p: &str) -> Result<Pattern, String> {
     } else {
         format!("**/{body}")
     };
-    let matcher = GlobBuilder::new(&glob)
-        .literal_separator(true)
-        .build()
-        .map_err(|e| format!("invalid pattern {p:?}: {e}"))?
-        .compile_matcher();
+    let parts = glob
+        .split('/')
+        .map(|c| match c {
+            "**" => Ok(Part::Any),
+            _ => glob_matcher(c, p).map(Part::One),
+        })
+        .collect::<Result<_, _>>()?;
     Ok(Pattern {
         original: p.to_string(),
-        glob,
         dir_only,
-        matcher,
+        matcher: glob_matcher(&glob, p)?,
+        parts,
     })
 }
 
@@ -251,6 +294,36 @@ fn name_glob(g: &str) -> GlobMatcher {
     Glob::new(g)
         .expect("built-in glob is valid")
         .compile_matcher()
+}
+
+/// A directory listing handed to [`Filter::decide`] for each of its entries.
+/// Whether any sibling matches a rule's markers is computed at most once per
+/// rule, and only when an entry's name first needs it. Use one per directory
+/// and one filter.
+pub struct Siblings<'a> {
+    names: &'a [String],
+    markers: RefCell<Vec<Option<bool>>>,
+}
+
+impl<'a> Siblings<'a> {
+    pub fn new(names: &'a [String]) -> Siblings<'a> {
+        Siblings {
+            names,
+            markers: RefCell::default(),
+        }
+    }
+
+    fn has_marker(&self, rule: usize, markers: &[GlobMatcher]) -> bool {
+        let mut cache = self.markers.borrow_mut();
+        if cache.len() <= rule {
+            cache.resize(rule + 1, None);
+        }
+        *cache[rule].get_or_insert_with(|| {
+            self.names
+                .iter()
+                .any(|s| markers.iter().any(|m| m.is_match(s)))
+        })
+    }
 }
 
 pub struct Filter {
@@ -295,7 +368,7 @@ impl Filter {
         &self,
         rel: &RelPath,
         is_dir: bool,
-        siblings: &[String],
+        siblings: &Siblings,
         parent_excluded: bool,
     ) -> Decision {
         if self.include.iter().any(|p| p.matches(rel, is_dir)) {
@@ -308,7 +381,7 @@ impl Filter {
             return Decision::Exclude(Reason::Exclude(p.original.clone()));
         }
         let name = rel.file_name();
-        for r in &self.rules {
+        for (i, r) in self.rules.iter().enumerate() {
             let kind_ok = match r.applies {
                 Applies::File => !is_dir,
                 Applies::Dir => is_dir,
@@ -316,10 +389,7 @@ impl Filter {
             };
             if kind_ok
                 && r.name.is_match(name)
-                && (r.markers.is_empty()
-                    || siblings
-                        .iter()
-                        .any(|s| r.markers.iter().any(|m| m.is_match(s))))
+                && (r.markers.is_empty() || siblings.has_marker(i, &r.markers))
             {
                 return Decision::Exclude(Reason::Rule(r.label.clone()));
             }
@@ -327,19 +397,14 @@ impl Filter {
         Decision::Include
     }
 
-    /// Could some include pattern match an entry at or below `dir`? Used to
-    /// decide whether an excluded directory must still be walked (spec §5.1).
+    /// Must the excluded directory `dir` still be walked because an include
+    /// may match below it (spec §5.1)? As in gitignore, an excluded folder
+    /// is only entered for a pattern that names it: an anchored pattern whose
+    /// leading components match `dir`, or a `**/` pattern whose next
+    /// components match `dir`'s last ones. A bare `*.keep` never enters one.
     pub fn may_include_below(&self, dir: &RelPath) -> bool {
-        let dir_c: Vec<&str> = dir.components().collect();
-        self.include.iter().any(|p| {
-            let lit: Vec<&str> = p
-                .glob
-                .split('/')
-                .take_while(|c| !c.contains(['*', '?', '[', '{']))
-                .collect();
-            let n = lit.len().min(dir_c.len());
-            lit[..n] == dir_c[..n]
-        })
+        let dir: Vec<&str> = dir.components().collect();
+        self.include.iter().any(|p| p.may_match_below(&dir))
     }
 
     pub fn is_secret(&self, rel: &RelPath) -> bool {
@@ -360,6 +425,9 @@ mod tests {
     fn filter(packs: &[RulePack], include: &[&str], exclude: &[&str]) -> Filter {
         Filter::new(packs, &s(include), &s(exclude), &[]).unwrap()
     }
+    fn dec(f: &Filter, p: &str, is_dir: bool, sib: &[&str], parent: bool) -> Decision {
+        f.decide(&r(p), is_dir, &Siblings::new(&s(sib)), parent)
+    }
     fn excluded(d: Decision) -> bool {
         matches!(d, Decision::Exclude(_))
     }
@@ -367,10 +435,11 @@ mod tests {
     #[test]
     fn target_excluded_only_next_to_cargo_toml() {
         let f = filter(&[RulePack::Dev], &[], &[]);
-        let d = f.decide(
-            &r("tools/target"),
+        let d = dec(
+            &f,
+            "tools/target",
             true,
-            &s(&["Cargo.toml", "src", "target"]),
+            &["Cargo.toml", "src", "target"],
             false,
         );
         assert_eq!(
@@ -378,12 +447,12 @@ mod tests {
             Decision::Exclude(Reason::Rule("target/ next to Cargo.toml".into()))
         );
         assert_eq!(
-            f.decide(&r("notes/target"), true, &s(&["target", "todo.md"]), false),
+            dec(&f, "notes/target", true, &["target", "todo.md"], false),
             Decision::Include
         );
         // A *file* called target is never a build dir.
         assert_eq!(
-            f.decide(&r("x/target"), false, &s(&["Cargo.toml", "target"]), false),
+            dec(&f, "x/target", false, &["Cargo.toml", "target"], false),
             Decision::Include
         );
     }
@@ -391,20 +460,22 @@ mod tests {
     #[test]
     fn build_dir_needs_a_project_marker() {
         let f = filter(&[RulePack::Dev], &[], &[]);
-        assert!(excluded(f.decide(
-            &r("x/build"),
+        assert!(excluded(dec(
+            &f,
+            "x/build",
             true,
-            &s(&["app.xcodeproj", "build"]),
+            &["app.xcodeproj", "build"],
             false
         )));
-        assert!(excluded(f.decide(
-            &r("x/build"),
+        assert!(excluded(dec(
+            &f,
+            "x/build",
             true,
-            &s(&["build.gradle.kts", "build"]),
+            &["build.gradle.kts", "build"],
             false
         )));
         assert_eq!(
-            f.decide(&r("x/build"), true, &s(&["build", "README.md"]), false),
+            dec(&f, "x/build", true, &["build", "README.md"], false),
             Decision::Include
         );
     }
@@ -412,16 +483,18 @@ mod tests {
     #[test]
     fn marker_globs_match() {
         let f = filter(&[RulePack::Dev], &[], &[]);
-        assert!(excluded(f.decide(
-            &r("w/.next"),
+        assert!(excluded(dec(
+            &f,
+            "w/.next",
             true,
-            &s(&["next.config.mjs"]),
+            &["next.config.mjs"],
             false
         )));
-        assert!(excluded(f.decide(
-            &r("w/.svelte-kit"),
+        assert!(excluded(dec(
+            &f,
+            "w/.svelte-kit",
             true,
-            &s(&["svelte.config.js"]),
+            &["svelte.config.js"],
             false
         )));
     }
@@ -430,13 +503,13 @@ mod tests {
     fn junk_is_part_of_dev_and_default() {
         for packs in [&[RulePack::Dev][..], &[RulePack::Junk][..]] {
             let f = filter(packs, &[], &[]);
-            assert!(excluded(f.decide(&r("a/.DS_Store"), false, &[], false)));
-            assert!(excluded(f.decide(&r("a/._foo"), false, &[], false)));
-            assert!(excluded(f.decide(&r("a/x.swp"), false, &[], false)));
+            assert!(excluded(dec(&f, "a/.DS_Store", false, &[], false)));
+            assert!(excluded(dec(&f, "a/._foo", false, &[], false)));
+            assert!(excluded(dec(&f, "a/x.swp", false, &[], false)));
         }
         let junk_only = filter(&[RulePack::Junk], &[], &[]);
         assert_eq!(
-            junk_only.decide(&r("p/target"), true, &s(&["Cargo.toml"]), false),
+            dec(&junk_only, "p/target", true, &["Cargo.toml"], false),
             Decision::Include
         );
     }
@@ -444,16 +517,13 @@ mod tests {
     #[test]
     fn no_packs_includes_everything() {
         let f = filter(&[], &[], &[]);
-        assert_eq!(
-            f.decide(&r("a/.DS_Store"), false, &[], false),
-            Decision::Include
-        );
+        assert_eq!(dec(&f, "a/.DS_Store", false, &[], false), Decision::Include);
     }
 
     #[test]
     fn private_but_important_files_are_never_excluded_by_rules() {
         let f = filter(&[RulePack::Dev], &[], &[]);
-        let sib = s(&["Cargo.toml", "package.json", "composer.json"]);
+        let sib = &["Cargo.toml", "package.json", "composer.json"];
         for (p, dir) in [
             ("p/.git", true),
             ("p/.claude", true),
@@ -465,7 +535,7 @@ mod tests {
             ("p/dist", true),
             ("p/debug.log", false),
         ] {
-            assert_eq!(f.decide(&r(p), dir, &sib, false), Decision::Include, "{p}");
+            assert_eq!(dec(&f, p, dir, sib, false), Decision::Include, "{p}");
         }
     }
 
@@ -481,31 +551,27 @@ mod tests {
                 "a/b",
             ],
         );
-        assert!(excluded(f.decide(
-            &r("recorder/downloads"),
+        assert!(excluded(dec(&f, "recorder/downloads", true, &[], false)));
+        assert_eq!(
+            dec(&f, "x/recorder/downloads", true, &[], false),
+            Decision::Include
+        );
+        assert_eq!(
+            dec(&f, "recorder/downloads", false, &[], false),
+            Decision::Include
+        );
+        assert!(excluded(dec(&f, "deep/er/c.log", false, &[], false)));
+        assert!(excluded(dec(
+            &f,
+            "webshop/src-tauri/gen/apple/Externals",
             true,
             &[],
             false
         )));
+        assert!(excluded(dec(&f, "a/b", false, &[], false)));
+        assert_eq!(dec(&f, "x/a/b", false, &[], false), Decision::Include);
         assert_eq!(
-            f.decide(&r("x/recorder/downloads"), true, &[], false),
-            Decision::Include
-        );
-        assert_eq!(
-            f.decide(&r("recorder/downloads"), false, &[], false),
-            Decision::Include
-        );
-        assert!(excluded(f.decide(&r("deep/er/c.log"), false, &[], false)));
-        assert!(excluded(f.decide(
-            &r("webshop/src-tauri/gen/apple/Externals"),
-            true,
-            &[],
-            false
-        )));
-        assert!(excluded(f.decide(&r("a/b"), false, &[], false)));
-        assert_eq!(f.decide(&r("x/a/b"), false, &[], false), Decision::Include);
-        assert_eq!(
-            f.decide(&r("q.log"), false, &[], false),
+            dec(&f, "q.log", false, &[], false),
             Decision::Exclude(Reason::Exclude("*.log".into()))
         );
     }
@@ -514,15 +580,12 @@ mod tests {
     fn include_beats_exclude_and_rules() {
         let f = filter(&[RulePack::Dev], &["target/keep.txt", "*.keep"], &["*.log"]);
         assert_eq!(
-            f.decide(&r("target/keep.txt"), false, &[], true),
+            dec(&f, "target/keep.txt", false, &[], true),
             Decision::Include
         );
+        assert_eq!(dec(&f, "a/x.keep", false, &[], false), Decision::Include);
         assert_eq!(
-            f.decide(&r("a/x.keep"), false, &[], false),
-            Decision::Include
-        );
-        assert_eq!(
-            f.decide(&r("a/x.keep.log"), false, &[], false),
+            dec(&f, "a/x.keep.log", false, &[], false),
             Decision::Exclude(Reason::Exclude("*.log".into()))
         );
     }
@@ -531,23 +594,62 @@ mod tests {
     fn children_of_an_excluded_dir_inherit_the_exclusion() {
         let f = filter(&[], &["/big/keep/"], &["/big/"]);
         assert_eq!(
-            f.decide(&r("big/other"), false, &[], true),
+            dec(&f, "big/other", false, &[], true),
             Decision::Exclude(Reason::Inherited)
         );
-        assert_eq!(f.decide(&r("big/keep"), true, &[], true), Decision::Include);
+        assert_eq!(dec(&f, "big/keep", true, &[], true), Decision::Include);
     }
 
     #[test]
-    fn may_include_below_is_conservative() {
+    fn anchored_includes_walk_only_their_own_path() {
         let f = filter(&[], &["/big/keep/x.txt"], &[]);
         assert!(f.may_include_below(&r("big")));
         assert!(f.may_include_below(&r("big/keep")));
+        assert!(!f.may_include_below(&r("big/keep/x.txt")));
         assert!(!f.may_include_below(&r("other")));
-        let any = filter(&[], &["x.txt"], &[]);
-        assert!(any.may_include_below(&r("whatever/deep")));
+        assert!(!f.may_include_below(&r("x/big")));
         let wild = filter(&[], &["/a/*/keep"], &[]);
         assert!(wild.may_include_below(&r("a/b")));
+        assert!(!wild.may_include_below(&r("b/a")));
+        let deep = filter(&[], &["/a/**/keep"], &[]);
+        assert!(deep.may_include_below(&r("a/b/c/d")));
+        assert!(!deep.may_include_below(&r("b/c")));
         assert!(!filter(&[], &[], &[]).may_include_below(&r("a")));
+    }
+
+    #[test]
+    fn unanchored_includes_walk_only_folders_they_name() {
+        for p in ["x.txt", "*.keep"] {
+            let any = filter(&[], &[p], &[]);
+            assert!(!any.may_include_below(&r("whatever/deep")), "{p}");
+            assert!(!any.may_include_below(&r("node_modules")), "{p}");
+        }
+        let nm = filter(&[], &["**/node_modules/keep.txt"], &[]);
+        assert!(nm.may_include_below(&r("x/node_modules")));
+        assert!(nm.may_include_below(&r("node_modules")));
+        assert!(!nm.may_include_below(&r("target")));
+        assert!(!nm.may_include_below(&r("x/node_modules/y")));
+        let wild = filter(&[], &["**/a/*/keep"], &[]);
+        assert!(wild.may_include_below(&r("p/a")));
+        assert!(wild.may_include_below(&r("p/a/b")));
+        assert!(!wild.may_include_below(&r("p/b")));
+        assert!(!wild.may_include_below(&r("p/a/b/c")));
+        let deep = filter(&[], &["**/a/**/keep"], &[]);
+        assert!(deep.may_include_below(&r("p/a/b/c")));
+        assert!(!deep.may_include_below(&r("p/b/c")));
+    }
+
+    #[test]
+    fn marker_presence_is_cached_per_rule() {
+        let f = filter(&[RulePack::Dev], &[], &[]);
+        let names = s(&["Cargo.toml", "package.json", "node_modules", "target"]);
+        let sib = Siblings::new(&names);
+        for n in ["target", "node_modules", "target"] {
+            assert!(excluded(f.decide(&r(n), true, &sib, false)), "{n}");
+        }
+        assert_eq!(f.decide(&r("build"), true, &sib, false), Decision::Include);
+        let cached = sib.markers.borrow().iter().filter(|m| m.is_some()).count();
+        assert_eq!(cached, 3, "target, node_modules and build markers");
     }
 
     #[test]

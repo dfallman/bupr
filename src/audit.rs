@@ -103,7 +103,20 @@ pub fn audit(preset: &Preset, min_hint_bytes: u64) -> anyhow::Result<AuditReport
         } else {
             root.join(&repo)
         };
+        // The repo's own config is not ours to trust: keep git from running
+        // programs it names (fsmonitor, hooks) or writing to the index.
         let out = Command::new("git")
+            .args([
+                "--no-pager",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.untrackedCache=false",
+            ])
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_TERMINAL_PROMPT", "0")
             .arg("-C")
             .arg(&dir)
             .args([

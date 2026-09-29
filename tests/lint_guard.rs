@@ -65,6 +65,10 @@ fn clippy_bans_the_core_write_apis() {
         "cap_std::fs::Dir::remove_dir_all",
         "cap_std::fs::Dir::open_with",
         "xattr::FileExt::set_xattr",
+        "libc::fcopyfile",
+        "libc::fclonefileat",
+        "libc::unlinkat",
+        "libc::renameat",
     ] {
         assert!(
             cfg.contains(&format!("\"{api}\"")),

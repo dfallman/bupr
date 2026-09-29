@@ -144,10 +144,11 @@ pub fn plan_lines(preset: &Preset, s: &PlanSummary, home: &Path) -> Vec<String> 
             count(s.secret_files)
         ));
     }
-    if s.skipped_special + s.skipped_mounts + s.collisions + s.scan_errors > 0 {
+    let other_disks = s.skipped_mounts + s.dest_mounts;
+    if s.skipped_special + other_disks + s.collisions + s.scan_errors > 0 {
         v.push(format!(
             "  skipped    {} special, {} on other disks, {} name collisions, {} unreadable",
-            s.skipped_special, s.skipped_mounts, s.collisions, s.scan_errors
+            s.skipped_special, other_disks, s.collisions, s.scan_errors
         ));
     }
     v

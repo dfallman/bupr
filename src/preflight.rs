@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::MARKER_NAME;
 use crate::config::Preset;
 use crate::dest::Marker;
+use crate::plan::{Volume, name_key};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Env {
@@ -57,27 +58,40 @@ pub struct Resolved {
     pub missing_ancestors: Vec<PathBuf>,
 }
 
+/// Refused as a destination themselves; folders inside them are fine.
 const PROTECTED: &[&str] = &[
     "/",
+    "/Users",
+    "/private",
+    "/var",
+    "/Volumes",
+    "/private/var",
+    "/private/tmp",
+    "/tmp",
+];
+
+/// System folders refused as a destination together with everything inside
+/// them (AUD-M7).
+const PROTECTED_TREES: &[&str] = &[
     "/System",
     "/Library",
     "/Applications",
-    "/Users",
-    "/private",
     "/usr",
     "/bin",
     "/sbin",
     "/etc",
-    "/var",
     "/opt",
-    "/Volumes",
-    "/private/var",
-    "/private/etc",
-    "/private/tmp",
-    "/tmp",
     "/cores",
     "/dev",
+    "/private/etc",
+    "/private/var/db",
+    "/private/var/root",
 ];
+
+pub fn is_protected(dest: &Path) -> bool {
+    PROTECTED.iter().any(|x| Path::new(x) == dest)
+        || PROTECTED_TREES.iter().any(|x| dest.starts_with(x))
+}
 
 fn nearest_existing(p: &Path) -> &Path {
     let mut cur = p;
@@ -127,6 +141,18 @@ pub fn resolve_lenient(p: &Path) -> io::Result<(PathBuf, Vec<PathBuf>)> {
     Ok((full, missing))
 }
 
+/// Identity of a destination folder for comparing presets: symlinks
+/// resolved, and matched the way its volume matches names (AUD-H6).
+pub fn dest_key(p: &Path) -> String {
+    let resolved = resolve_lenient(p).map_or_else(|_| p.to_path_buf(), |(r, _)| r);
+    name_key(&resolved.to_string_lossy(), is_case_insensitive(&resolved))
+}
+
+/// Whether two destination keys name the same folder or one inside the other.
+pub fn keys_overlap(a: &str, b: &str) -> bool {
+    Path::new(a).starts_with(b) || Path::new(b).starts_with(a)
+}
+
 pub fn is_mount_point(p: &Path) -> bool {
     match (
         fs::symlink_metadata(p),
@@ -170,10 +196,7 @@ pub fn check_paths(p: &Preset, env: &Env) -> Result<Resolved, PreflightError> {
         message: e.to_string(),
     })?;
     check_volume(&dest, env)?;
-    if PROTECTED.iter().any(|x| Path::new(x) == dest)
-        || dest == env.volumes
-        || env.home.starts_with(&dest)
-    {
+    if is_protected(&dest) || dest == env.volumes || env.home.starts_with(&dest) {
         return Err(PreflightError::Protected(dest));
     }
     if dest.starts_with(&source) || source.starts_with(&dest) {
@@ -276,6 +299,44 @@ pub fn is_case_insensitive(p: &Path) -> bool {
     unsafe { libc::pathconf(c.as_ptr(), libc::_PC_CASE_SENSITIVE) != 1 }
 }
 
+fn statfs(p: &Path) -> Option<libc::statfs> {
+    let c = cstr(nearest_existing(p)).ok()?;
+    let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0).then_some(s)
+}
+
+/// Filesystem type name, such as "apfs", "hfs" or "exfat".
+pub fn fs_type(p: &Path) -> Option<String> {
+    let s = statfs(p)?;
+    let name = unsafe { CStr::from_ptr(s.f_fstypename.as_ptr()) };
+    Some(name.to_string_lossy().into_owned())
+}
+
+/// What the destination volume keeps, for comparing files (AUD-M1) and
+/// estimating space (AUD-H4). Unknown filesystems get the plain size and
+/// whole-second comparison.
+pub fn volume(p: &Path) -> Volume {
+    let fs = fs_type(p).unwrap_or_default();
+    let apfs = fs == "apfs";
+    let native = apfs || fs == "hfs";
+    Volume {
+        case_insensitive: is_case_insensitive(p),
+        nanos: apfs,
+        modes: native,
+        xattrs: native,
+        sparse: apfs,
+    }
+}
+
+pub fn block_size(p: &Path) -> io::Result<u64> {
+    let c = cstr(nearest_existing(p))?;
+    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(s.f_frsize)
+}
+
 pub fn mount_point(p: &Path) -> Option<PathBuf> {
     let c = cstr(nearest_existing(p)).ok()?;
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
@@ -286,6 +347,8 @@ pub fn mount_point(p: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(name.to_string_lossy().into_owned()))
 }
 
+/// Whether the volume at `mount` is encrypted, per `diskutil`. `None` when
+/// that cannot be told; callers treat it as not known to be encrypted.
 pub fn is_encrypted(mount: &Path) -> Option<bool> {
     let out = Command::new("/usr/sbin/diskutil")
         .arg("info")
@@ -296,23 +359,18 @@ pub fn is_encrypted(mount: &Path) -> Option<bool> {
     if !out.status.success() {
         return None;
     }
-    let xml = String::from_utf8_lossy(&out.stdout);
-    match (plist_bool(&xml, "FileVault"), plist_bool(&xml, "Encrypted")) {
+    encryption_from_plist(&out.stdout)
+}
+
+/// Reads the top-level `FileVault` and `Encrypted` keys of `diskutil info -plist`.
+pub fn encryption_from_plist(xml: &[u8]) -> Option<bool> {
+    let value = plist::Value::from_reader_xml(xml).ok()?;
+    let dict = value.as_dictionary()?;
+    let key = |k: &str| dict.get(k).and_then(plist::Value::as_boolean);
+    match (key("FileVault"), key("Encrypted")) {
         (Some(true), _) | (_, Some(true)) => Some(true),
         (None, None) => None,
         _ => Some(false),
-    }
-}
-
-pub fn plist_bool(xml: &str, key: &str) -> Option<bool> {
-    let needle = format!("<key>{key}</key>");
-    let rest = xml[xml.find(&needle)? + needle.len()..].trim_start();
-    if rest.starts_with("<true/>") {
-        Some(true)
-    } else if rest.starts_with("<false/>") {
-        Some(false)
-    } else {
-        None
     }
 }
 
@@ -392,6 +450,7 @@ mod tests {
             "/".into(),
             "/Users".into(),
             "/System".into(),
+            "/usr/local/backup".into(),
         ] {
             let r = check_paths(&preset(&fx, dest.clone()), &fx.env);
             assert!(
@@ -477,12 +536,59 @@ mod tests {
         assert!(MarkerStatus::Foreign.needs_adoption() && !MarkerStatus::Fresh.needs_adoption());
     }
 
+    fn plist(body: &str) -> Vec<u8> {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\">\n<dict>{body}</dict>\n</plist>\n"
+        )
+        .into_bytes()
+    }
+
     #[test]
-    fn plist_parsing() {
-        let xml = "<dict>\n\t<key>Encrypted</key>\n\t<false/>\n\t<key>FileVault</key>\n\t<true/>\n</dict>";
-        assert_eq!(plist_bool(xml, "Encrypted"), Some(false));
-        assert_eq!(plist_bool(xml, "FileVault"), Some(true));
-        assert_eq!(plist_bool(xml, "Missing"), None);
+    fn encryption_comes_from_the_top_level_keys_only() {
+        let yes = plist("<key>Encrypted</key><false/><key>FileVault</key><true/>");
+        assert_eq!(encryption_from_plist(&yes), Some(true));
+        let no = plist("<key>Encrypted</key><false/><key>FileVault</key><false/>");
+        assert_eq!(encryption_from_plist(&no), Some(false));
+        // A nested dictionary or a string that looks like the key does not count.
+        let decoy = plist(
+            "<key>VolumeName</key><string>&lt;key&gt;Encrypted&lt;/key&gt;&lt;true/&gt;</string>\
+             <key>APFS</key><dict><key>Encrypted</key><true/></dict>",
+        );
+        assert_eq!(encryption_from_plist(&decoy), None);
+        assert_eq!(encryption_from_plist(b"not a plist"), None);
+    }
+
+    #[test]
+    fn system_folders_are_protected_with_everything_inside() {
+        for p in [
+            "/usr/local",
+            "/System/Library",
+            "/Library/Application Support",
+            "/opt/homebrew",
+            "/private/etc/x",
+            "/Users",
+            "/Volumes",
+        ] {
+            assert!(is_protected(Path::new(p)), "{p}");
+        }
+        for p in [
+            "/Users/me/Backups",
+            "/Volumes/Backup/dev",
+            "/private/var/folders/x",
+            "/private/tmp/x",
+        ] {
+            assert!(!is_protected(Path::new(p)), "{p}");
+        }
+    }
+
+    #[test]
+    fn volume_facts_follow_the_filesystem() {
+        let fx = fx();
+        let v = volume(&fx.root);
+        if fs_type(&fx.root).as_deref() == Some("apfs") {
+            assert!(v.nanos && v.modes && v.xattrs && v.sparse);
+        }
+        assert!(block_size(&fx.root).unwrap() >= 512);
     }
 
     #[test]
@@ -492,5 +598,21 @@ mod tests {
         assert!(free_space(&missing).unwrap() > 0);
         let _ = is_case_insensitive(&missing);
         assert!(mount_point(&missing).is_some());
+    }
+
+    #[test]
+    fn destination_keys_see_through_symlinks_and_case() {
+        let fx = fx();
+        tu::symlink(fx.root.join("backups").to_str().unwrap(), &fx.root, "link");
+        let a = dest_key(&fx.root.join("backups/dev"));
+        assert!(keys_overlap(&a, &dest_key(&fx.root.join("link/dev"))));
+        assert!(keys_overlap(&a, &dest_key(&fx.root.join("link/dev/sub"))));
+        assert!(!keys_overlap(
+            &a,
+            &dest_key(&fx.root.join("backups/devices"))
+        ));
+        if is_case_insensitive(&fx.root) {
+            assert!(keys_overlap(&a, &dest_key(&fx.root.join("BACKUPS/Dev"))));
+        }
     }
 }

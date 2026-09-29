@@ -448,8 +448,8 @@ mod tests {
     }
 
     const SUMMARY_JSON: &str = r#"{"source":"/s","dest":"/d","totals":{"copy_files":2,"copy_bytes":300,
-        "replaced_bytes":0,"unchanged_files":7,"unchanged_bytes":0,"delete_entries":0,"delete_bytes":0},
+        "unchanged_files":7,"unchanged_bytes":0,"delete_entries":0,"delete_bytes":0},
         "marker":{"status":"fresh"},"free_bytes":null,"needed_bytes":300,"over_delete_limit":false,
         "insufficient_space":false,"secret_files":0,"largest_deletes":[],"skipped_special":0,
-        "skipped_mounts":0,"collisions":0,"scan_errors":0,"case_insensitive":true}"#;
+        "skipped_mounts":0,"dest_mounts":0,"collisions":0,"scan_errors":0,"case_insensitive":true}"#;
 }

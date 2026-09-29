@@ -305,6 +305,46 @@ fn edit_validates_before_saving() {
 }
 
 #[test]
+fn edit_runs_the_editor_without_a_shell() {
+    let c = cli_fx("");
+    let before = fs::read_to_string(&c.config).unwrap();
+    let marker = c.fx.root.join("injected");
+    let editor = c.fx.root.join("my editor.sh");
+    fs::write(&editor, "#!/bin/sh\nprintf '\\n# %s\\n' \"$1\" >> \"$2\"\n").unwrap();
+    chmod(&editor, 0o755);
+
+    let quoted = format!("'{}' --tag", editor.display());
+    bupr(&c)
+        .arg("edit")
+        .env("VISUAL", &quoted)
+        .assert()
+        .success();
+    assert!(
+        fs::read_to_string(&c.config)
+            .unwrap()
+            .ends_with("# --tag\n")
+    );
+
+    let after = fs::read_to_string(&c.config).unwrap();
+    for bad in [
+        format!("'{}' x; touch '{}'", editor.display(), marker.display()),
+        format!("true $(touch '{}')", marker.display()),
+        format!("true `touch '{}'`", marker.display()),
+    ] {
+        bupr(&c)
+            .arg("edit")
+            .env("VISUAL", &bad)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("$VISUAL"));
+        assert!(!marker.exists(), "{bad:?} ran a shell");
+        assert_eq!(fs::read_to_string(&c.config).unwrap(), after);
+        assert!(!c.fx.root.join("config.toml.edit").exists());
+    }
+    assert_ne!(before, after);
+}
+
+#[test]
 fn all_reports_a_missing_source_instead_of_skipping_it() {
     let c = cli_fx(
         "\n[presets.moved]\nsource = \"/nonexistent/bupr-moved\"\ndestination = \"/Volumes/whatever/x\"\n",
@@ -320,4 +360,25 @@ fn all_reports_a_missing_source_instead_of_skipping_it() {
         h.contains("\"preset\":\"moved\"") && h.contains("preflight_failed"),
         "{h}"
     );
+}
+
+#[test]
+fn a_second_run_on_the_same_destination_is_refused() {
+    let c = cli_fx("");
+    write(&c.fx.src, "a.txt", b"a");
+    let key = bupr::preflight::dest_key(&c.fx.dst);
+    let lock = bupr::state::lock_destination(&c.fx.root.join("state/bupr/locks"), &key)
+        .unwrap()
+        .expect("free");
+    bupr(&c)
+        .arg("dev")
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains(
+            "another bupr run is already using",
+        ));
+    assert!(!c.fx.dst.exists());
+    drop(lock);
+    bupr(&c).arg("dev").assert().success();
+    assert!(c.fx.dst.join("a.txt").exists());
 }
