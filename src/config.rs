@@ -174,6 +174,25 @@ impl Config {
             .into_iter()
             .map(|(name, rp)| Preset::from_raw(name, rp, home))
             .collect::<Result<Vec<_>, _>>()?;
+        // A mirror deletes everything it does not own, so two presets must
+        // never share or nest destinations.
+        for (i, b) in presets.iter().enumerate() {
+            for a in &presets[..i] {
+                if a.destination.starts_with(&b.destination)
+                    || b.destination.starts_with(&a.destination)
+                {
+                    return Err(ConfigError::Invalid {
+                        preset: b.name.clone(),
+                        message: format!(
+                            "destination {} overlaps the destination of preset \"{}\" ({})",
+                            b.destination.display(),
+                            a.name,
+                            a.destination.display()
+                        ),
+                    });
+                }
+            }
+        }
         Ok(Config { presets })
     }
 
@@ -344,6 +363,19 @@ mod tests {
             c.get("media").unwrap().destination,
             PathBuf::from("/Volumes/Backup/media/video")
         );
+    }
+
+    #[test]
+    fn overlapping_destinations_across_presets_are_rejected() {
+        let base = "[presets.dev]\nsource=\"/a\"\ndestination=\"/Volumes/B/dev\"\n";
+        for other in ["/Volumes/B/dev", "/Volumes/B/dev/media", "/Volumes/B"] {
+            let text = format!("{base}[presets.media]\nsource=\"/m\"\ndestination=\"{other}\"\n");
+            let e = parse(&text).unwrap_err();
+            assert!(e.to_string().contains("overlaps"), "{other}: {e}");
+        }
+        let ok =
+            format!("{base}[presets.media]\nsource=\"/m\"\ndestination=\"/Volumes/B/devices\"\n");
+        assert!(parse(&ok).is_ok());
     }
 
     #[test]

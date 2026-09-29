@@ -247,7 +247,19 @@ fn list_plan(plan: &Plan, emit: &mut dyn FnMut(Event)) {
     }
 }
 
-fn remove(dest: &dyn DestOps, d: &DeleteItem) -> std::io::Result<()> {
+/// Delete a planned entry, unless the entry now at that path is not the one
+/// the scan saw (different inode): a case-folded alias of a just-copied file,
+/// or something created since. Returns whether it was deleted.
+fn remove(dest: &dyn DestOps, d: &DeleteItem) -> std::io::Result<bool> {
+    if let Some(ino) = dest.identity(&d.rel)?
+        && ino != d.ino
+    {
+        return Ok(false);
+    }
+    remove_now(dest, d).map(|()| true)
+}
+
+fn remove_now(dest: &dyn DestOps, d: &DeleteItem) -> std::io::Result<()> {
     if d.kind == Kind::Dir {
         dest.remove_dir(&d.rel)
     } else {
@@ -386,6 +398,10 @@ fn execute(
             adopt,
         } => (allow_deletes, adopt),
     };
+    let mut allow_deletes = allow_deletes;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(interrupted());
+    }
     if marker.needs_adoption() && !adopt {
         return Err(stop(
             Outcome::Aborted,
@@ -394,6 +410,22 @@ fn execute(
                 resolved.dest.display()
             ),
         ));
+    }
+
+    // Another preset's backup (its own .bupr-dest) inside this destination is
+    // never ours to delete.
+    for d in plan.deletes.iter().chain(&plan.replace_trees) {
+        if d.rel.file_name() == MARKER_NAME
+            && let Some(foreign) = d.rel.parent()
+        {
+            error(
+                stats,
+                emit,
+                foreign.as_str(),
+                "holds another bupr backup (.bupr-dest); not deleting it — check your presets' destinations",
+            );
+            allow_deletes = false;
+        }
     }
 
     let real;
@@ -435,11 +467,17 @@ fn execute(
         let _ = dest.remove_nondir(t);
     }
     for (from, to) in &plan.renames {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(interrupted());
+        }
         if let Err(e) = dest.rename(from, to) {
             error(stats, emit, to.as_str(), format!("rename from {from}: {e}"));
         }
     }
     for c in &plan.clear {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(interrupted());
+        }
         if let Err(e) = dest.remove_nondir(c) {
             error(stats, emit, c.as_str(), e);
         }
@@ -448,8 +486,17 @@ fn execute(
     let mut blocked: Vec<&RelPath> = Vec::new();
     if allow_deletes {
         for d in &plan.replace_trees {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(interrupted());
+            }
             match remove(dest, d) {
-                Ok(()) => stats.deleted += 1,
+                Ok(true) => stats.deleted += 1,
+                Ok(false) => error(
+                    stats,
+                    emit,
+                    d.rel.as_str(),
+                    "changed since the scan; not replaced",
+                ),
                 Err(e) => error(stats, emit, d.rel.as_str(), e),
             }
         }
@@ -467,6 +514,9 @@ fn execute(
     let is_blocked = |r: &RelPath| blocked.iter().any(|b| r.starts_with(b));
 
     for m in &plan.mkdirs {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(interrupted());
+        }
         if !is_blocked(m)
             && let Err(e) = dest.mkdir(m)
         {
@@ -552,12 +602,17 @@ fn execute(
                     return Err(interrupted());
                 }
                 match remove(dest, d) {
-                    Ok(()) => {
+                    Ok(true) => {
                         stats.deleted += 1;
                         emit(Event::Deleted {
                             path: d.rel.to_string(),
                         });
                     }
+                    Ok(false) => warn(
+                        stats,
+                        emit,
+                        format!("{}: changed since the scan; not deleted", d.rel),
+                    ),
                     Err(e) => error(stats, emit, d.rel.as_str(), e),
                 }
             }

@@ -30,6 +30,9 @@ pub struct Entry {
     pub mtime: i64,
     pub mode: u32,
     pub link_target: Option<PathBuf>,
+    /// Inode number at scan time (destination entries are re-checked
+    /// against it before deletion).
+    pub ino: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +68,7 @@ fn entry(rel: RelPath, kind: Kind, meta: &fs::Metadata, link_target: Option<Path
         mtime: meta.mtime(),
         mode: meta.mode() & 0o7777,
         link_target,
+        ino: meta.ino(),
     }
 }
 

@@ -70,6 +70,10 @@ impl Fx {
 
 impl Drop for Fx {
     fn drop(&mut self) {
+        // Spec §3.7: every test ends with the sentinel byte-identical.
+        if !std::thread::panicking() {
+            self.assert_outside_untouched();
+        }
         // Read-only directories created by tests would block TempDir cleanup.
         make_all_writable(&self.root);
     }

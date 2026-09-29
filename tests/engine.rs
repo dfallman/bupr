@@ -384,3 +384,99 @@ fn preflight_failure_is_reported_once() {
     assert!(r.events.iter().any(|e| matches!(e, Event::Fatal { .. })));
     assert!(!fx.dst.exists());
 }
+
+#[test]
+fn apfs_case_folded_rename_keeps_the_file() {
+    let fx = Fx::new();
+    if !bupr::preflight::is_case_insensitive(&fx.root) {
+        eprintln!("skipping: temp volume is case-sensitive");
+        return;
+    }
+    write(&fx.src, "strasse.txt", b"v1");
+    write(&fx.src, "Strasse/a.txt", b"a");
+    run(&fx, &fx.preset());
+    fs::rename(fx.src.join("strasse.txt"), fx.src.join("straße.txt")).unwrap();
+    fs::rename(fx.src.join("Strasse"), fx.src.join("Straße")).unwrap();
+    let r = run(&fx, &fx.preset());
+    assert_eq!(r.stats.outcome, Outcome::Ok, "{:?}", r.stats);
+    assert_eq!(r.stats.deleted, 0);
+    assert_eq!(fs::read(fx.dst.join("straße.txt")).unwrap(), b"v1");
+    assert_eq!(fs::read(fx.dst.join("Straße/a.txt")).unwrap(), b"a");
+}
+
+#[test]
+fn entries_replaced_since_the_scan_are_not_deleted() {
+    let fx = Fx::new();
+    write(&fx.src, "a.txt", b"a");
+    run(&fx, &fx.preset());
+    write(&fx.dst, "extra.txt", b"old");
+    write(&fx.src, "b.txt", b"b");
+    let dst = fx.dst.clone();
+    let r = run_with(
+        &fx,
+        &fx.preset(),
+        &RunOptions::default(),
+        proceed(),
+        &AtomicBool::new(false),
+        &mut |e| {
+            if let Event::FileStart { path, .. } = e
+                && path == "b.txt"
+            {
+                fs::remove_file(dst.join("extra.txt")).unwrap();
+                fs::write(dst.join("extra.txt"), b"new file, new inode").unwrap();
+            }
+        },
+    );
+    assert_eq!(r.stats.deleted, 0, "{:?}", r.stats);
+    assert_eq!(
+        fs::read(fx.dst.join("extra.txt")).unwrap(),
+        b"new file, new inode"
+    );
+}
+
+#[test]
+fn another_presets_backup_inside_the_destination_is_never_deleted() {
+    let fx = Fx::new();
+    write(&fx.src, "a.txt", b"a");
+    run(&fx, &fx.preset());
+    write(
+        &fx.dst,
+        "media/.bupr-dest",
+        br#"{"preset":"media","source":"/m","created":"t"}"#,
+    );
+    write(&fx.dst, "media/movie.mp4", b"precious");
+    let r = run(&fx, &fx.preset());
+    assert_eq!(r.stats.outcome, Outcome::Errors, "{:?}", r.stats);
+    assert_eq!(r.stats.deleted, 0);
+    assert_eq!(
+        fs::read(fx.dst.join("media/movie.mp4")).unwrap(),
+        b"precious"
+    );
+}
+
+#[test]
+fn ctrl_c_during_the_decision_changes_nothing() {
+    let fx = Fx::new();
+    write(&fx.src, "x/inner", b"dir");
+    write(&fx.src, "keep.txt", b"k");
+    run(&fx, &fx.preset());
+    fs::remove_dir_all(fx.src.join("x")).unwrap();
+    write(&fx.src, "x", b"now a file");
+    write(&fx.src, "newdir/f", b"f");
+    let before = snapshot(&fx.dst);
+    let cancel = AtomicBool::new(false);
+    let stats = bupr::engine::run(
+        &fx.preset(),
+        &fx.env(),
+        &RunOptions::default(),
+        &mut |_| {},
+        &mut |_| {
+            cancel.store(true, Ordering::Relaxed);
+            proceed()
+        },
+        &cancel,
+    );
+    assert_eq!(stats.outcome, Outcome::Interrupted);
+    assert_eq!(stats.deleted, 0);
+    assert_eq!(snapshot(&fx.dst), before, "nothing may change after Ctrl-C");
+}

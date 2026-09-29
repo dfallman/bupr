@@ -27,6 +27,8 @@ pub struct DeleteItem {
     pub rel: RelPath,
     pub kind: Kind,
     pub size: u64,
+    /// Inode seen by the destination scan.
+    pub ino: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,12 +69,15 @@ pub struct Plan {
     pub totals: Totals,
 }
 
-/// Matching key for a path on the destination filesystem: NFC-normalized
-/// (APFS is normalization-insensitive), case-folded when case-insensitive.
+/// Matching key for a path on the destination filesystem. APFS is
+/// normalization-insensitive, and when case-insensitive it uses full Unicode
+/// case folding (ß≡ss, ς≡σ, µ≡μ, ﬀ≡ff), so the key is the canonical caseless
+/// form NFD(fold(NFD(s))). Folding more than the filesystem does is safe: it
+/// only turns a copy into a rename or reports a collision.
 pub fn name_key(s: &str, case_insensitive: bool) -> String {
-    let n: String = s.nfc().collect();
+    let n: String = s.nfd().collect();
     if case_insensitive {
-        n.to_lowercase()
+        caseless::default_case_fold_str(&n).nfd().collect()
     } else {
         n
     }
@@ -212,6 +217,7 @@ pub fn build(
             rel: effective(&d.rel, &renamed),
             kind: d.kind,
             size: d.size,
+            ino: d.ino,
         };
         if replaced_dirs.iter().any(|x| d.rel.starts_with(x)) {
             plan.replace_trees.push(item);
@@ -258,6 +264,7 @@ mod tests {
             mtime,
             mode: 0o644,
             link_target: None,
+            ino: 0,
         }
     }
     fn d(rel: &str) -> Entry {
@@ -268,6 +275,7 @@ mod tests {
             mtime: 0,
             mode: 0o755,
             link_target: None,
+            ino: 0,
         }
     }
     fn l(rel: &str, target: &str) -> Entry {
@@ -278,6 +286,7 @@ mod tests {
             mtime: 0,
             mode: 0o755,
             link_target: Some(target.into()),
+            ino: 0,
         }
     }
     fn names<'a>(v: impl IntoIterator<Item = &'a RelPath>) -> Vec<&'a str> {
@@ -401,6 +410,33 @@ mod tests {
             );
             assert_eq!(p.totals.unchanged_files, 1);
         }
+    }
+
+    #[test]
+    fn full_case_folding_matches_like_apfs() {
+        // APFS folds ß≡ss, ς≡σ, µ≡μ, ﬀ≡ff: a rename between them must be a
+        // rename, never copy-then-delete of what is really the same file.
+        for (src, dst) in [
+            ("straße.txt", "strasse.txt"),
+            ("ς.txt", "σ.txt"),
+            ("µ.txt", "μ.txt"),
+            ("ﬀ.txt", "ff.txt"),
+        ] {
+            let p = build(&[f(src, 3, 1)], &[f(dst, 3, 1)], &[], true);
+            assert_eq!(p.renames, vec![(r(dst), r(src))], "{src} vs {dst}");
+            assert!(
+                p.deletes.is_empty() && p.copies.is_empty(),
+                "{src} vs {dst}"
+            );
+        }
+        let dir = build(
+            &[d("Straße"), f("Straße/a", 1, 1)],
+            &[d("Strasse"), f("Strasse/a", 1, 1)],
+            &[],
+            true,
+        );
+        assert_eq!(dir.renames, vec![(r("Strasse"), r("Straße"))]);
+        assert!(dir.deletes.is_empty() && dir.copies.is_empty());
     }
 
     #[test]

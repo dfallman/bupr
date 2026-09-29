@@ -332,14 +332,18 @@ pub fn run_presets(ctx: &Ctx, names: &[String], prompter: &mut dyn Prompter) -> 
     code
 }
 
-/// Presets whose paths pass preflight, and the others with a short reason.
+/// Presets to run for `--all`, and those skipped because their drive is not
+/// mounted. Any other preflight problem is not a skip: the preset runs, fails
+/// preflight, is reported and recorded (spec §7.1).
 pub fn available_presets(ctx: &Ctx) -> (Vec<String>, Vec<(String, String)>) {
     let mut ok = Vec::new();
     let mut skipped = Vec::new();
     for p in &ctx.config.presets {
         match preflight::check_paths(p, &ctx.env) {
-            Ok(_) => ok.push(p.name.clone()),
-            Err(e) => skipped.push((p.name.clone(), menu_reason(&e))),
+            Err(e @ preflight::PreflightError::NotMounted(_)) => {
+                skipped.push((p.name.clone(), menu_reason(&e)))
+            }
+            _ => ok.push(p.name.clone()),
         }
     }
     (ok, skipped)

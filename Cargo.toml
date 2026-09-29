@@ -10,6 +10,7 @@ anyhow = "1.0.104"
 bytesize = "2.7.0"
 cap-fs-ext = "4.0.3"
 cap-std = "4.0.3"
+caseless = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
 ctrlc = "3.5.2"
 globset = "0.4.20"

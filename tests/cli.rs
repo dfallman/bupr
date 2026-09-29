@@ -303,3 +303,21 @@ fn edit_validates_before_saving() {
     );
     assert!(!c.fx.root.join("config.toml.edit").exists());
 }
+
+#[test]
+fn all_reports_a_missing_source_instead_of_skipping_it() {
+    let c = cli_fx(
+        "\n[presets.moved]\nsource = \"/nonexistent/bupr-moved\"\ndestination = \"/Volumes/whatever/x\"\n",
+    );
+    write(&c.fx.src, "a.txt", b"a");
+    bupr(&c)
+        .arg("--all")
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("✗ moved"));
+    let h = history(&c);
+    assert!(
+        h.contains("\"preset\":\"moved\"") && h.contains("preflight_failed"),
+        "{h}"
+    );
+}

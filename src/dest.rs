@@ -52,6 +52,9 @@ pub trait DestOps {
     ) -> io::Result<CopyReport>;
     fn make_writable(&self, rel: Option<&RelPath>) -> io::Result<()>;
     fn set_dir_attrs(&self, rel: &RelPath, mode: u32, mtime: i64) -> io::Result<()>;
+    /// Current inode of `rel` (not following symlinks), or `None` when the
+    /// implementation cannot tell (simulation).
+    fn identity(&self, rel: &RelPath) -> io::Result<Option<u64>>;
 }
 
 pub fn to_system_time(secs: i64) -> SystemTime {
@@ -259,6 +262,11 @@ impl DestOps for Dest {
         Ok(())
     }
 
+    fn identity(&self, rel: &RelPath) -> io::Result<Option<u64>> {
+        let m = self.root.symlink_metadata(rel.as_path())?;
+        Ok(Some(cap_std::fs::MetadataExt::ino(&m)))
+    }
+
     fn set_dir_attrs(&self, rel: &RelPath, mode: u32, mtime: i64) -> io::Result<()> {
         let f = self.dir_handle(Some(rel))?.into_std_file();
         f.set_times(FileTimes::new().set_modified(to_system_time(mtime)))?;
@@ -301,6 +309,9 @@ impl DestOps for SimulatedDest {
     }
     fn make_writable(&self, _: Option<&RelPath>) -> io::Result<()> {
         Ok(())
+    }
+    fn identity(&self, _: &RelPath) -> io::Result<Option<u64>> {
+        Ok(None)
     }
     fn set_dir_attrs(&self, _: &RelPath, _: u32, _: i64) -> io::Result<()> {
         Ok(())
