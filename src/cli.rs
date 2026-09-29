@@ -64,6 +64,8 @@ pub enum Cmd {
     Edit,
     /// Show the built-in rule packs
     Rules,
+    /// Create a preset interactively
+    New,
     #[command(name = "__worker", hide = true)]
     Worker,
 }
@@ -103,6 +105,7 @@ fn dispatch(cli: &Cli, config_path: &Path) -> i32 {
         Some(Cmd::Worker) => unreachable!("handled in main"),
         Some(Cmd::Init) => cmd_init(config_path),
         Some(Cmd::Rules) => cmd_rules(),
+        Some(Cmd::New) => cmd_new(cli, config_path),
         Some(Cmd::Edit) => cmd_edit(config_path, cli.yes || !interactive()),
         Some(Cmd::Log { preset, limit }) => cmd_log(preset.as_deref(), *limit),
         Some(Cmd::List) => match load_config(config_path) {
@@ -160,6 +163,10 @@ fn print_presets(ctx: &Ctx) {
 }
 
 fn run_command(cli: &Cli, config_path: &Path) -> i32 {
+    if cli.presets.is_empty() && !cli.all && interactive() && !config_path.exists() {
+        println!("No presets yet — let's create one.");
+        return cmd_new(cli, config_path);
+    }
     let config = match load_config(config_path) {
         Ok(c) => c,
         Err(code) => return code,
@@ -181,7 +188,7 @@ fn run_command(cli: &Cli, config_path: &Path) -> i32 {
     }
     if cli.presets.is_empty() {
         if !ctx.unattended {
-            return run_menu(&ctx, &mut prompter);
+            return run_menu(&ctx, config_path, &mut prompter);
         }
         println!("Presets:");
         print_presets(&ctx);
@@ -194,16 +201,23 @@ fn run_command(cli: &Cli, config_path: &Path) -> i32 {
     runner::run_presets(&ctx, &cli.presets, &mut prompter)
 }
 
-fn run_menu(ctx: &Ctx, prompter: &mut InquirePrompter) -> i32 {
+fn run_menu(ctx: &Ctx, config_path: &Path, prompter: &mut InquirePrompter) -> i32 {
     let history = crate::history::read_all(&ctx.history_path);
     let rows = crate::ui::menu::rows(&ctx.config, &history, &ctx.env, jiff::Timestamp::now());
     if rows.is_empty() {
         eprintln!("No presets yet. Run `bupr new` to create one.");
         return 2;
     }
-    match crate::ui::menu::pick(&rows, false) {
+    match crate::ui::menu::pick(&rows, true) {
         crate::ui::menu::Choice::Run(name) => runner::run_presets(ctx, &[name], prompter),
-        crate::ui::menu::Choice::New | crate::ui::menu::Choice::Quit => 0,
+        crate::ui::menu::Choice::New => match crate::ui::wizard::run(config_path, &ctx.env) {
+            Ok(_) => 0,
+            Err(e) => {
+                eprintln!("✗ {e}");
+                2
+            }
+        },
+        crate::ui::menu::Choice::Quit => 0,
     }
 }
 
@@ -363,6 +377,46 @@ fn cmd_edit(path: &Path, unattended: bool) -> i32 {
                     return 2;
                 }
             }
+        }
+    }
+}
+
+fn cmd_new(cli: &Cli, config_path: &Path) -> i32 {
+    if !interactive() {
+        eprintln!(
+            "`bupr new` needs an interactive terminal; edit the config with `bupr edit` instead."
+        );
+        return 2;
+    }
+    let env = Env::system();
+    match crate::ui::wizard::run(config_path, &env) {
+        Ok(Some(name)) => {
+            let dry = inquire::Confirm::new("Do a dry run now?")
+                .with_default(true)
+                .prompt()
+                .unwrap_or(false);
+            if !dry {
+                return 0;
+            }
+            match load_config(config_path) {
+                Ok(c) => {
+                    let mut ctx = context(cli, c);
+                    ctx.mode = Mode::DryRun;
+                    runner::run_presets(
+                        &ctx,
+                        &[name],
+                        &mut InquirePrompter {
+                            home: ctx.env.home.clone(),
+                        },
+                    )
+                }
+                Err(code) => code,
+            }
+        }
+        Ok(None) => 0,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            2
         }
     }
 }

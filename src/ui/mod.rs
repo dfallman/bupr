@@ -6,3 +6,4 @@ pub mod format;
 pub mod menu;
 pub mod plain;
 pub mod prompt;
+pub mod wizard;
