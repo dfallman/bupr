@@ -1,3 +1,3 @@
 fn main() {
-    println!("bupr {}", env!("CARGO_PKG_VERSION"));
+    std::process::exit(bupr::cli::main());
 }
