@@ -1,4 +1,6 @@
 /target
 /docs
 claude.md
+.superpowers/
+.DS_Store
 
