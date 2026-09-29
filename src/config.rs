@@ -13,24 +13,23 @@ pub const RESERVED_NAMES: &[&str] = &[
 pub const DEFAULT_MAX_DELETE: u64 = 200;
 pub const DEFAULT_MAX_DELETE_SIZE: &str = "10 GB";
 
-pub const STARTER_CONFIG: &str = r#"# bupr presets — see `bupr rules` for what each rule pack skips.
+pub const STARTER_CONFIG: &str = r#"# bupr presets — https://github.com/dfallman/bupr
+# `bupr rules` lists what each rule pack skips; `bupr audit dev` suggests more.
 
 [presets.dev]
 description = "All my code"
 source      = "~/dev"
 destination = "/Volumes/Backup/dev"
-rules       = ["dev"]
+rules       = ["dev"]   # skip target/, node_modules/, .build/ and friends
 exclude     = [
-  "/recorder/downloads/",      # recordings — backed up by the media preset
-  "/recorder/Drive/",          # stray copies of other projects
-  "/archive/test-data/",
-  "**/gen/apple/Externals/",  # Tauri-built iOS libraries (regenerable)
+  # "/some-project/recordings/",   # gitignore-style; a leading / is relative to source
 ]
 
-[presets.media]
-description = "recorder recordings"
-source      = "~/dev/recorder/downloads"
-destination = "/Volumes/Backup/media/video"
+# Another preset, run with `bupr photos` (or `bupr --all`):
+#
+# [presets.photos]
+# source      = "~/Pictures"
+# destination = "/Volumes/Backup/photos"
 "#;
 
 #[derive(Debug, thiserror::Error)]
@@ -354,15 +353,27 @@ mod tests {
     }
 
     #[test]
-    fn starter_config_parses() {
+    fn starter_config_parses_and_is_generic() {
         let c = parse(STARTER_CONFIG).unwrap();
+        assert_eq!(c.presets.len(), 1);
         let dev = c.get("dev").unwrap();
         assert_eq!(dev.rules, vec![RulePack::Dev]);
-        assert!(dev.exclude.contains(&"/recorder/downloads/".to_string()));
-        assert_eq!(
-            c.get("media").unwrap().destination,
-            PathBuf::from("/Volumes/Backup/media/video")
-        );
+        assert_eq!(dev.source, PathBuf::from("/Users/me/dev"));
+        assert_eq!(dev.destination, PathBuf::from("/Volumes/Backup/dev"));
+        for personal in ["video", "archive", "Externals"] {
+            assert!(!STARTER_CONFIG.contains(personal), "{personal}");
+        }
+        // The commented-out example preset must parse once uncommented.
+        let uncommented: String = STARTER_CONFIG
+            .lines()
+            .map(|l| {
+                l.strip_prefix("# ")
+                    .filter(|r| r.starts_with('[') || r.contains(" = "))
+                    .unwrap_or(l)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(parse(&uncommented).unwrap().get("photos").is_some());
     }
 
     #[test]
