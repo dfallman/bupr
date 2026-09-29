@@ -4,11 +4,13 @@
 pub mod config;
 pub mod dest;
 pub mod engine;
+pub mod history;
 pub mod plan;
 pub mod preflight;
 pub mod relpath;
 pub mod rules;
 pub mod scan;
+pub mod state;
 pub mod worker;
 
 /// Destination marker file (spec §3.6).
