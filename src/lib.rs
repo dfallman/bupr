@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod dest;
+pub mod engine;
 pub mod plan;
 pub mod preflight;
 pub mod relpath;
