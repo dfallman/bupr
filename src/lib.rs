@@ -11,6 +11,7 @@ pub mod relpath;
 pub mod rules;
 pub mod scan;
 pub mod state;
+pub mod ui;
 pub mod worker;
 
 /// Destination marker file (spec §3.6).

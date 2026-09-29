@@ -1,0 +1,13 @@
+---
+source: src/ui/dashboard.rs
+expression: "draw(&copying(), 60)"
+---
+"╭ bupr · dev ────────────────────────────────────── mirror ╮"
+"│ ███████████████████░░░░░░░░░░░░░░  57%   3.1 GB / 5.4 GB │"
+"│ files 8,214/14,002   142.0 MB/s   0:22 → eta 0:17        │"
+"│ unchanged 96,110   deleted 12   errors 0                 │"
+"│                                                          │"
+"│ ▸ webshop/src/lib/components/Timeline.svelte     48.0 kB │"
+"│   player/core/src/decoder.rs                     12.0 kB │"
+"│   player/api/openapi.yaml                         3.0 kB │"
+"╰──────────────────────────────────────────────────────────╯"
