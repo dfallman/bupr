@@ -2,8 +2,13 @@
 name = "bupr"
 version = "0.1.0"
 edition = "2024"
-description = "Preset-based mirror backups for macOS"
+description = "Preset-based mirror backups for macOS, with project-aware excludes and a kernel-sandboxed copier"
 license = "MIT"
+repository = "https://github.com/dfallman/bupr"
+readme = "README.md"
+keywords = ["backup", "mirror", "macos", "cli", "rsync"]
+categories = ["command-line-utilities", "filesystem"]
+rust-version = "1.88"
 
 [dependencies]
 anyhow = "1.0.104"
