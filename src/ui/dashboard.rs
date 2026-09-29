@@ -144,6 +144,18 @@ impl DashState {
     }
 }
 
+/// The dashboard-side twin of `format::alert`, as a styled line.
+pub fn alert_line(msg: &str, color: bool) -> Line<'static> {
+    if color {
+        Line::from(Span::styled(
+            format!(" ⚠ {msg} "),
+            Style::default().fg(Color::White).bg(Color::Red),
+        ))
+    } else {
+        Line::from(Span::raw(format!("⚠ {msg}")))
+    }
+}
+
 pub fn render(s: &DashState, area: Rect, buf: &mut Buffer, color: bool) {
     let st = |style: Style| if color { style } else { Style::default() };
     let dim = st(Style::default().fg(Color::DarkGray));
@@ -295,6 +307,14 @@ impl Dashboard {
         self.draw(true)
     }
 
+    /// Print a `⚠` alert into the scrollback above the dashboard.
+    pub fn alert(&mut self, msg: &str) -> io::Result<()> {
+        let line = alert_line(msg, self.color);
+        self.terminal
+            .insert_before(1, |buf| Paragraph::new(line).render(buf.area, buf))?;
+        self.draw(true)
+    }
+
     /// Clear the viewport and leave the cursor at its top, so ordinary output
     /// (prompts, the summary line) continues where the dashboard was.
     pub fn close(mut self) -> DashState {
@@ -356,6 +376,20 @@ mod tests {
         s.scan_files = 110_316;
         s.scan_bytes = 12_300_000_000;
         insta::assert_snapshot!(draw(&s, 60));
+    }
+
+    #[test]
+    fn alert_lines_are_white_on_red_only_with_color() {
+        use ratatui::style::{Color, Style};
+        let l = alert_line("careful", true);
+        assert_eq!(l.spans[0].content, " ⚠ careful ");
+        assert_eq!(
+            l.spans[0].style,
+            Style::default().fg(Color::White).bg(Color::Red)
+        );
+        let plain = alert_line("careful", false);
+        assert_eq!(plain.spans[0].content, "⚠ careful");
+        assert_eq!(plain.spans[0].style, Style::default());
     }
 
     #[test]

@@ -6,6 +6,16 @@ pub fn bytes(n: u64) -> String {
     bytesize::ByteSize::b(n).display().si().to_string()
 }
 
+/// A `⚠` alert: white on red when `color` is on, plain text otherwise
+/// (pipes, NO_COLOR, --no-color).
+pub fn alert(msg: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[97;41m ⚠ {msg} \x1b[0m")
+    } else {
+        format!("⚠ {msg}")
+    }
+}
+
 pub fn count(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
@@ -76,6 +86,12 @@ mod tests {
         assert_eq!(count(1_234_567), "1,234,567");
         assert_eq!(bytes(5_400_000_000), "5.4 GB");
         assert_eq!(bytes(0), "0 B");
+    }
+
+    #[test]
+    fn alerts_are_white_on_red_only_with_color() {
+        assert_eq!(alert("careful", true), "\x1b[97;41m ⚠ careful \x1b[0m");
+        assert_eq!(alert("careful", false), "⚠ careful");
     }
 
     #[test]

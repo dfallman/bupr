@@ -140,6 +140,15 @@ impl View {
         }
     }
 
+    fn alert(&mut self, msg: &str, color: bool) {
+        match self {
+            View::Dash { live: Some(d), .. } => {
+                let _ = d.alert(msg);
+            }
+            _ => println!("  {}", crate::ui::format::alert(msg, color)),
+        }
+    }
+
     fn suspend(&mut self) {
         if let View::Dash { live, parked, .. } = self
             && let Some(d) = live.take()
@@ -236,10 +245,13 @@ fn execute_one(ctx: &Ctx, preset: &Preset, sandbox: bool, prompter: &mut dyn Pro
                     }
                 }
                 if summary.secret_files > 0 && encrypted == Some(false) {
-                    view.note(&format!(
-                        "  ⚠ {} secret file(s) (.env, keys) will be copied to an unencrypted drive",
-                        count(summary.secret_files)
-                    ));
+                    view.alert(
+                        &format!(
+                            "{} secret file(s) (.env, keys) will be copied to an unencrypted drive",
+                            count(summary.secret_files)
+                        ),
+                        ctx.color,
+                    );
                 }
                 if ctx.mode != Mode::DryRun {
                     let ask = !ctx.unattended && summary.needs_prompt();
@@ -304,7 +316,14 @@ fn run_one(ctx: &Ctx, preset: &Preset, sandbox: bool, prompter: &mut dyn Prompte
 pub fn run_presets(ctx: &Ctx, names: &[String], prompter: &mut dyn Prompter) -> i32 {
     let sandbox = worker::sandbox_available();
     if !sandbox {
-        eprintln!("⚠ kernel sandbox unavailable; running with in-process safety only");
+        let color = ctx.color && std::io::stderr().is_terminal();
+        eprintln!(
+            "{}",
+            crate::ui::format::alert(
+                "kernel sandbox unavailable; running with in-process safety only",
+                color
+            )
+        );
     }
     let mut code = 0;
     for (i, name) in names.iter().enumerate() {
