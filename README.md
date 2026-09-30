@@ -2,10 +2,19 @@
 
 **Preset-based mirror backups for the macOS termial**
 
-Type `bupr dev` and your `~/dev` folder is mirrored to your backup drive.
-The gigabytes of `target/`, `node_modules/` and `.build/` output that your
-tools can regenerate are left out. A live progress view runs right in your
-terminal.
+Bupr is designed to be a straightforward way to backup (mirror) working folders on your macOS 
+internal storage with (typically) external drives and mounted NAS devices.
+
+It is preset-based, meaning that instead of writing long shell commands at the 
+prompt, you describe each backup job once in a small TOML file, then run it by name.
+
+For instance, you type `bupr dev` and your "dev" preset mirrors your `~/dev` folder to 
+your specified backup drive. Bupr allows you to exclude file types and folders for each present, 
+meaning that gigabytes of `target/`, `debug/`, `node_modules/` and `.build/` output that your
+tools can regenerate can be left out. 
+
+Bupr uses macOS's sandboxing mechanism to ensure only the destination folder specified in each 
+preset can be written to. 
 
 ```
 $ bupr dev
@@ -22,10 +31,7 @@ bupr · dev  ~/dev → /Volumes/Backup/dev
 ╰──────────────────────────────────────────────────────────╯
 ```
 
-Run `bupr` on its own to pick a preset from an arrow-key menu.
-
-> **Status:** early (v0.1). It is used daily by its author, but expect rough
-> edges. It runs on macOS only.
+Run `bupr` without arguments to pick a preset from a menu.
 
 ## Contents
 
