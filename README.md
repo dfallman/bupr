@@ -13,7 +13,7 @@ preset's name each time you want to run the job.
   <img width="600" alt="bupr" src="https://github.com/user-attachments/assets/3eb68fb4-54ae-4f83-85cd-2c292069690e" />
 </p>
 
-### Typical usage scenario
+### Example use
 You type `bupr dev` at the prompt and your 'dev' preset job runs, 
 mirroring your `~/dev` folder to an external USB backup drive. 
 
