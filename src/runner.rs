@@ -240,11 +240,9 @@ fn execute_one(ctx: &Ctx, preset: &Preset, sandbox: bool, prompter: &mut dyn Pro
             tilde(&resolved.dest, &ctx.env.home)
         );
     }
-    let encrypted = if ctx.mode == Mode::Simulate {
-        None
-    } else {
-        preflight::mount_point(&resolved.dest).and_then(|m| preflight::is_encrypted(&m))
-    };
+    // Every mode checks, so a simulation warns and asks exactly as a real run.
+    let encrypted =
+        preflight::mount_point(&resolved.dest).and_then(|m| preflight::is_encrypted(&m));
     let profile = sandbox.then(|| {
         let (r, write) = (&resolved, ctx.mode == Mode::Run);
         worker::sandbox_profile(&r.source, &r.dest, &r.missing_ancestors, write)
@@ -295,8 +293,7 @@ fn execute_one(ctx: &Ctx, preset: &Preset, sandbox: bool, prompter: &mut dyn Pro
                     }
                 }
                 // Unknown counts as unencrypted: the warning fails closed (AUD-M5).
-                if summary.secret_files > 0 && ctx.mode != Mode::Simulate && encrypted != Some(true)
-                {
+                if summary.secret_files > 0 && encrypted != Some(true) {
                     let drive = if encrypted == Some(false) {
                         "an unencrypted drive"
                     } else {

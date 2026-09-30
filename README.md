@@ -127,7 +127,7 @@ bupr · dev  ~/dev → /Volumes/Backup/dev
 ✓ dev (dry run) · nothing was changed · 0:00
 ```
 
-Add `-v` to list every path (`+` copy, `d` new folder, `-` delete,
+Add `-v` to list every path (`+` copy, `d` new folder, `~` link, `-` delete,
 `>` rename). When the plan looks right, run it:
 
 ```
@@ -274,7 +274,7 @@ read, disk read errors, and the real throughput.
 | | `--dry-run` | `--simulate` |
 |---|---|---|
 | Shows the plan | yes (`-v` for every path) | summary line, then the dashboard |
-| Asks the usual questions | no | yes |
+| Asks the usual questions | no | yes, except about free space |
 | Reads file contents | no | yes, every file to be copied |
 | Finds unreadable files and read errors | only folders it can't list | yes |
 | Realistic speed and ETA | no | yes |
