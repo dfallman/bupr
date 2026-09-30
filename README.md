@@ -29,8 +29,8 @@ You type `bupr dev` at the prompt and your 'dev' preset job runs,
 mirroring your `~/dev` folder to an external USB backup drive. 
 
 Modern apps across programming, video editing, music editing, and 3D modelling create gigabytes of
-temporary output that your tools can easily regenerate and you typically don't need or
-want to backup. Bupr allows you to exclude file types and folders for each present, 
+temporary output that your tools can easily regenerate that you typically don't need or
+want to backup. Bupr makes it easy to exclude file types and folders for each present, 
 meaning that folders such as `target/`, `debug/`, `node_modules/` and `.build/` can be left out. 
 
 Bupr implements [several safety layers](#safety) to ensure safe file operations. It's written in Rust 
