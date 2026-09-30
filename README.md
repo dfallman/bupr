@@ -24,16 +24,18 @@ bupr · dev  ~/dev → /Volumes/Backup/dev
 ╰──────────────────────────────────────────────────────────╯
 ```
 
-### Example
-Type `bupr dev` and your 'dev' preset job runs, mirroring your `~/dev` folder to 
-your external USB backup drive. 
+### Typical usage scenario
+You type `bupr dev` at the prompt and your 'dev' preset job runs, 
+mirroring your `~/dev` folder to an external USB backup drive. 
 
 Bupr allows you to exclude file types and folders for each present, 
 meaning that gigabytes of `target/`, `debug/`, `node_modules/` and `.build/` output that your
 tools can regenerate can be left out. 
 
 Bupr implements [several safety layers](#safety) to ensure safe file operations. It's written in Rust 
-and have no external dependencies.
+and have no external dependencies. By design, bupr is a CLI utility and does not by itself
+have mechanisms for scheduling backups. However, you can use [launchd](#nightly-backups-with-launchd) 
+to set up recurring backups with bupr.
 
 ## Contents
 
