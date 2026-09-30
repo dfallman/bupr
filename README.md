@@ -93,10 +93,12 @@ bupr dev               # back up for real
 
 Prefer to be asked questions? 
 
-```bupr new``` 
+```
+bupr new
+``` 
 
-This command walks you through creating a preset. It completes folder names as 
-you type (try with `Tab`) and checks the destination while you enter it. 
+This command uses a step by step interactive tutorial that walks you through creating a preset. 
+It completes folder names as you type (try with `Tab`) and checks the destination while you enter it. 
 
 ## Examples
 
