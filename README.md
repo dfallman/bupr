@@ -60,6 +60,7 @@ to set up recurring backups with bupr.
   [Safety](#safety).
 
 ## Install
+Note that bupr is a macOS only application, it does not work on Linux and Windows.
 
 With [Homebrew](https://brew.sh), on Apple silicon or Intel Macs:
 
