@@ -6,8 +6,8 @@ Bupr allows you to quickly and safely mirror folders in macOS. A typical use sce
 a folder structure on your internal storage to an external drive or a mounted NAS device.
 
 Bupr is preset-based, meaning that instead of writing long shell commands at the 
-prompt, you describe each backup job once in a small TOML file, then run it by name each time
-you want to run the job.
+prompt, you describe each backup job once in a small [#configuration](TOML file), then use the 
+preset's name each time you want to run the job.
 
 ```
 $ bupr dev
