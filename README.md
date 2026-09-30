@@ -1,9 +1,11 @@
 # bupr
 
 **Preset-based mirror backups for macOS.**
-Type `bupr dev` and your `~/dev` folder is mirrored to your backup drive,
-without the gigabytes of `target/`, `node_modules/` and `.build/` output that
-can be regenerated, with a live progress view right in your terminal.
+
+Type `bupr dev` and your `~/dev` folder is mirrored to your backup drive.
+The gigabytes of `target/`, `node_modules/` and `.build/` output that your
+tools can regenerate are left out. A live progress view runs right in your
+terminal.
 
 ```
 $ bupr dev
@@ -25,21 +27,34 @@ Run `bupr` on its own to pick a preset from an arrow-key menu.
 > **Status:** early (v0.1). It is used daily by its author, but expect rough
 > edges. It runs on macOS only.
 
+## Contents
+
+- [Why bupr?](#why-bupr)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Examples](#examples)
+- [Configuration](#configuration)
+- [Commands](#commands)
+- [How a run works](#how-a-run-works)
+- [Safety](#safety)
+- [Restoring](#restoring)
+- [Limitations](#limitations)
+
 ## Why bupr?
 
 - **Presets instead of shell scripts.** You describe each backup once in a
-  small TOML file, then run it by name. You no longer keep a long `rsync`
-  command in a script, where one missing `\` can silently break it.
+  small TOML file, then run it by name. There is no long `rsync` command
+  to keep in a script, where one missing `\` can silently break it.
 - **It skips only what can be regenerated.** A `target/` folder is skipped
   only when a `Cargo.toml` sits next to it. `node_modules/` needs a
   `package.json`, and `.build/` needs a `Package.swift`. Your `.git`
-  folders, lockfiles, `.env` files and gitignored agent notes (`CLAUDE.md`,
-  `.claude/`, `docs/`) are backed up. In practice this often turns
-  100+ GB of project folders into a backup of a few GB.
-- **You can see what it's doing.** It shows a live progress bar, speed, ETA
-  and the current files. `--dry-run` shows the plan without doing anything.
-  `--simulate` goes through the whole run, reading every file but writing
-  nothing.
+  folders, lockfiles, `.env` files and gitignored notes are backed up. In
+  practice this often turns 100+ GB of project folders into a backup of a
+  few GB.
+- **You can see what it's doing.** A live dashboard shows progress, speed,
+  ETA and the files being copied. `--dry-run` shows the plan without doing
+  anything. `--simulate` goes through the whole run, reading every file
+  but writing nothing.
 - **Safety comes first.** bupr can only write inside the preset's
   destination folder, and several independent layers enforce that. See
   [Safety](#safety).
@@ -63,22 +78,21 @@ cargo install --path .
 ## Quick start
 
 ```sh
-bupr init              # writes a starter config to ~/.config/bupr/config.toml
-bupr edit              # adjust it in $EDITOR; it is validated when you save
-bupr dev --dry-run -v  # show exactly what would be copied and deleted
-bupr dev --simulate    # a full run that reads every file but writes nothing
+bupr init              # write a starter config to ~/.config/bupr/config.toml
+bupr edit              # adjust it in $EDITOR; it is checked when you save
+bupr dev --dry-run -v  # see exactly what would be copied and deleted
 bupr dev               # back up for real
 ```
 
-You can also let `bupr new` walk you through creating a preset. It
-completes folder names as you type and checks the destination while you
-enter it.
+Prefer to be asked questions? `bupr new` walks you through creating a
+preset. It completes folder names as you type and checks the destination
+while you enter it.
 
-## Presets
+## Examples
 
-Presets live in `~/.config/bupr/config.toml`. The file respects
-`$XDG_CONFIG_HOME`, and you can point at another file with `--config`. The
-menu lists presets in the order they appear in the file.
+### Back up your code folder
+
+Add a preset to `~/.config/bupr/config.toml`:
 
 ```toml
 [presets.dev]
@@ -86,14 +100,264 @@ description = "All my code"
 source      = "~/dev"
 destination = "/Volumes/Backup/dev"
 rules       = ["dev"]
-exclude     = ["/big-project/recordings/", "*.iso"]
-
-[presets.photos]
-source      = "~/Pictures"
-destination = "/Volumes/Backup/photos"
 ```
 
-Only `source` and `destination` are required.
+Check the plan first. Nothing is written:
+
+```
+$ bupr dev --dry-run
+bupr · dev  ~/dev → /Volumes/Backup/dev
+  copy       26 files (150.0 MB)
+  unchanged  0 files (0 B)
+  delete     0 entries (0 B)
+  folder     new backup folder
+  space      1.3 TB free, 183.8 MB needed
+  secrets    1 file(s) such as .env or keys
+✓ dev (dry run) · nothing was changed · 0:00
+```
+
+Add `-v` to list every path (`+` copy, `d` new folder, `-` delete,
+`>` rename). When the plan looks right, run it:
+
+```
+$ bupr dev
+bupr · dev  ~/dev → /Volumes/Backup/dev
+  26 files (150.0 MB) to copy · 0 to delete · 0 unchanged
+✓ dev · 26 files (150.0 MB) copied, 0 deleted, 0 unchanged · 0:00
+```
+
+Later runs copy only what changed.
+
+### Find out what makes a backup big
+
+`bupr audit` shows what a preset includes, what it skips and why. It also
+lists large folders that your `.gitignore` files ignore but bupr still
+backs up:
+
+```
+$ bupr audit dev
+dev · ~/dev → /Volumes/Backup/dev
+  backs up   26 files (150.0 MB)
+
+  skipped:
+        2.0 MB  target/ next to Cargo.toml
+      300.0 kB  node_modules/ next to package.json
+           0 B  .DS_Store
+
+  largest included folders:
+      150.0 MB  player
+      150.0 MB  player/recordings
+       27.3 kB  player/.git
+
+  large folders your .gitignore files ignore but bupr still backs up:
+      150.0 MB  player/recordings   → exclude with "/player/recordings/"
+  (these are only hints — gitignored files can matter, e.g. agent docs or .env)
+```
+
+To skip that folder, add the suggested pattern:
+
+```toml
+[presets.dev]
+# …
+exclude = ["/player/recordings/"]
+```
+
+The next run removes it from the backup, since the backup is a mirror.
+A dry run shows this first:
+
+```
+$ bupr dev --dry-run
+  copy       0 files (0 B)
+  unchanged  25 files (27.3 kB)
+  delete     2 entries (150.0 MB)
+  …
+```
+
+### Keep one file inside a skipped folder
+
+`include` wins over rules and excludes. To keep a locally patched package
+inside an otherwise skipped `node_modules/`, name the folder in the
+pattern:
+
+```toml
+[presets.web]
+source      = "~/dev/webshop"
+destination = "/Volumes/Backup/webshop"
+rules       = ["dev"]
+include     = ["/node_modules/my-patched-lib/"]
+```
+
+Everything else in `node_modules/` is still skipped.
+
+### Several drives and presets
+
+Give each drive and folder its own preset:
+
+```toml
+[presets.dev]
+source      = "~/dev"
+destination = "/Volumes/Backup/dev"
+rules       = ["dev"]
+
+[presets.photos]
+description = "Photos library"
+source      = "~/Pictures"
+destination = "/Volumes/Archive/photos"
+rules       = []            # copy everything, even .DS_Store
+
+[presets.docs]
+source      = "~/Documents"
+destination = "/Volumes/Backup/documents"
+max_delete  = 50            # ask before deleting more than 50 entries
+```
+
+Run one, several, or all of them. `--all` skips presets whose drive
+isn't plugged in:
+
+```
+$ bupr dev photos
+$ bupr --all --quiet
+– skipping photos: drive not mounted
+✓ dev · 0 files (0 B) copied, 0 deleted, 25 unchanged · 0:00
+```
+
+`bupr list` shows where each preset goes, whether its drive is there, and
+when it last ran:
+
+```
+$ bupr list
+  dev     ~/dev → /Volumes/Backup/dev  just now
+  photos  ~/Pictures → /Volumes/Archive/photos  (drive not mounted)
+```
+
+Naming an unplugged drive directly fails right away. bupr never quietly
+writes to your internal disk instead:
+
+```
+$ bupr photos
+✗ photos · drive not mounted: /Volumes/Archive is not available
+```
+
+### Rehearse a big run
+
+`--simulate` does everything a real run does, including reading every
+file with the live dashboard, but writes nothing. It is useful to check
+read speed, or to see whether any file is unreadable before the first large
+backup.
+
+```sh
+bupr photos --simulate
+```
+
+### Nightly backups with launchd
+
+bupr never prompts when it has no terminal, or when you pass `--yes`. It
+always takes the safe choice instead: deletions over the limit are skipped,
+and a folder it doesn't recognise is left alone. Save this as
+`~/Library/LaunchAgents/com.example.bupr.plist`, with your own username and
+the path from `which bupr`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.bupr</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/you/.cargo/bin/bupr</string>
+    <string>--all</string>
+    <string>--yes</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>2</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/you/Library/Logs/bupr.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/you/Library/Logs/bupr.log</string>
+</dict>
+</plist>
+```
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.bupr.plist
+```
+
+If a preset backs up a protected folder such as `~/Documents` or
+`~/Pictures`, macOS may block background access to it. Grant the `bupr`
+binary Full Disk Access in System Settings → Privacy & Security.
+
+Check how the nightly runs went with `bupr log`:
+
+```
+$ bupr log dev -n 3
+2026-09-28 02:30  dev        ok                 41 files (12.3 MB), 0 deleted  0:04
+2026-09-29 02:30  dev        deletions skipped  8 files (1.1 MB), 0 deleted  0:02
+2026-09-30 02:30  dev        ok                 17 files (3.0 MB), 2 deleted  0:03
+```
+
+Only one run can use a destination at a time. If you start a manual run
+while the nightly one is still going, it stops with exit code 2 rather than
+racing it.
+
+### Use bupr in a script
+
+The exit code tells a script what happened:
+
+| Code | Meaning |
+|---|---|
+| `0` | Success. |
+| `1` | Finished, but some files failed or deletions were skipped. |
+| `2` | Aborted, interrupted, or not run (drive not mounted, bad config, another run in progress). |
+
+With several presets, the exit code is the highest of them.
+
+```sh
+bupr --all --yes --quiet || osascript -e 'display notification "Check bupr log" with title "Backup needs attention"'
+```
+
+### Back up to the internal disk
+
+By default bupr refuses destinations on the Mac's own disk, because a
+backup on the same disk doesn't survive that disk failing. To keep a
+second copy there anyway (a staging copy before an upload, say), opt in:
+
+```toml
+[presets.staging]
+source         = "~/dev/webshop"
+destination    = "~/Backups/webshop"
+allow_internal = true
+```
+
+When the source is on the same APFS volume, files are cloned, so the copy
+takes almost no extra space until one side changes.
+
+### Keep secrets off unencrypted drives
+
+bupr warns when `.env` files or keys (`*.pem`, `*.key`, `id_rsa*`, …) are
+about to be copied to a drive that isn't known to be encrypted. To make
+this a hard stop, set `secrets_require_encryption`. Interactive runs ask
+first, and unattended runs abort. Add your own patterns with `secrets`:
+
+```toml
+[presets.dev]
+# …
+secrets                    = ["*.p12", "credentials.json"]
+secrets_require_encryption = true
+```
+
+## Configuration
+
+Presets live in `~/.config/bupr/config.toml`. The file respects
+`$XDG_CONFIG_HOME`, and `--config <path>` points at another file. The menu
+lists presets in the order they appear in the file. Only `source` and
+`destination` are required.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -101,39 +365,41 @@ Only `source` and `destination` are required.
 | `source` | *(required)* | The folder to back up. `~` is expanded. |
 | `destination` | *(required)* | The backup folder. It must be a subfolder on a mounted drive, never a volume root. |
 | `rules` | `["junk"]` | Built-in rule packs: `dev`, `junk`, or `[]` to copy everything. |
-| `exclude` | `[]` | Extra globs to skip, in gitignore style (see below). |
-| `include` | `[]` | Globs that are always backed up, even if a rule or exclude matches them. Only reaches inside an excluded folder that it names (see below). |
+| `exclude` | `[]` | Extra patterns to skip, in `.gitignore` style. |
+| `include` | `[]` | Patterns that are always backed up, even if a rule or exclude matches them. |
 | `max_delete` | `200` | Ask before deleting more entries than this in one run. |
 | `max_delete_size` | `"10 GB"` | Ask before deleting more data than this in one run. |
-| `secrets` | `[]` | Extra secret-file globs, used for the unencrypted-drive warning. |
+| `secrets` | `[]` | Extra secret-file patterns, for the unencrypted-drive warning. |
+| `secrets_require_encryption` | `false` | Ask before copying secret files to a drive not known to be encrypted. Unattended runs abort instead. |
 | `allow_internal` | `false` | Allow a destination on the internal disk. |
-| `secrets_require_encryption` | `false` | Ask before copying secret files to a drive that is not known to be encrypted. Unattended runs abort instead. |
 
 Unknown keys are an error, so a typo such as `exlude` can't silently turn
-off an exclude.
+off an exclude. `bupr edit` checks the file before saving it.
 
-**Glob syntax** follows `.gitignore`:
+### Patterns
 
-- A trailing `/` matches only folders.
-- `**` matches any depth.
+Patterns follow `.gitignore`:
+
+- A trailing `/` matches only folders: `cache/`.
 - A leading `/`, or a `/` in the middle, anchors the pattern to the source
-  folder. Any other pattern matches at any depth.
-- As in `.gitignore`, an `include` only looks inside an excluded folder
-  when it names that folder, so excluded folders are never read in full just
-  to find a match. An anchored pattern such as `/node_modules/keep.txt`
-  reaches inside the excluded `node_modules`, and
-  `**/node_modules/keep.txt` does so at any depth. A pattern without a
-  slash, such as `*.keep`, keeps matching files everywhere else but does not
-  look inside `node_modules/`, `target/` or other excluded folders.
+  folder: `/big-project/recordings/`. Any other pattern matches at any
+  depth: `*.iso`.
+- `**` matches any number of folders: `**/gen/apple/Externals/`.
+- An `include` looks inside an excluded folder only when it names that
+  folder, so excluded folders are never read in full just to find a match.
+  `/node_modules/keep.txt` reaches inside the top-level `node_modules/`,
+  and `**/node_modules/keep.txt` reaches inside every one. `*.keep` matches
+  everywhere else, but not inside `node_modules/`, `target/` or other
+  excluded folders.
 
 ### Rule packs
 
-Run `bupr rules` to print the full list.
+Run `bupr rules` for the full list.
 
 - **`junk`** skips OS clutter: `.DS_Store`, AppleDouble `._*` files,
-  `.Spotlight-V100`, `.Trashes`, editor swap files, and similar.
+  `.Spotlight-V100`, `.Trashes`, editor swap files and similar.
 - **`dev`** includes `junk`, plus build output and dependencies, but only
-  when the tool that produced them can be proved to be there:
+  when the tool that produced them is provably there:
 
 | Skipped folder | …only when next to |
 |---|---|
@@ -146,11 +412,10 @@ Run `bupr rules` to print the full list.
 | `.venv/`, `venv/` | `pyproject.toml`, `requirements.txt` or `setup.py` |
 | `DerivedData/`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/` | *(always)* |
 
-**bupr never uses `.gitignore` to skip anything.** People gitignore private
-but important files, such as `.env`, agent notes and local databases. Use
-`bupr audit <preset>` instead. It lists the largest included folders and
-points out big gitignored folders you might want to exclude, and you
-decide.
+**bupr never uses `.gitignore` to skip anything.** People gitignore
+private but important files, such as `.env`, agent notes (`CLAUDE.md`,
+`.claude/`) and local databases. `bupr audit` uses `.gitignore` only to
+suggest excludes, and you decide.
 
 ## Commands
 
@@ -165,129 +430,111 @@ bupr log [<preset>]        run history (-n to show more)
 bupr audit <preset>        what gets backed up, what is skipped and why, plus exclude hints
 bupr rules                 the built-in rule packs
 bupr new                   create a preset interactively
-bupr edit                  edit the config in $VISUAL/$EDITOR, validated on save
+bupr edit                  edit the config in $VISUAL/$EDITOR, checked on save
 bupr init                  write a starter config
 ```
 
-Global flags: `--config <path>`, `--yes` (never prompt; always take the safe
-choice), `--quiet`, `--no-color`.
+Global flags: `--config <path>`, `--yes` (never prompt; always take the
+safe choice), `--quiet`, `--no-color`.
+
+Every run is recorded in `~/.local/state/bupr/history.jsonl` (respects
+`$XDG_STATE_HOME`), which `bupr log` and the menu read.
 
 ## How a run works
 
 1. **Preflight.** bupr checks that the source exists and that the
-   destination is safe to use (see below). If the drive isn't mounted it
-   stops with *"drive not mounted"*. It never quietly creates the folder on
-   your internal disk instead.
-2. **Scan and plan.** bupr compares size and modification time. On an
-   APFS or HFS+ destination it also compares permissions and extended
-   attributes (such as Finder tags), and on APFS the modification time to
-   the nanosecond. Only new and changed files are copied. Files that no longer
-   exist in the source, or that are now excluded, are deleted from the
-   backup. The destination ends up as an exact mirror.
+   destination is safe to use. If the drive isn't mounted it stops. It
+   never creates the folder on your internal disk instead.
+2. **Scan and plan.** bupr compares each file's size and modification
+   time. On APFS and HFS+ drives it also compares permissions and extended
+   attributes such as Finder tags. Only new and changed files are copied.
+   Anything no longer in the source, or now excluded, is deleted from the
+   backup, so the destination ends up as an exact mirror.
 3. **Confirm, only when needed.** bupr asks before it:
    - deletes more than the configured limits,
    - uses a folder it didn't create,
-   - starts with too little free space.
-
-   If secret files such as `.env` or keys are about to be copied to a drive
-   that is not known to be encrypted, it prints a warning (and asks, with
-   `secrets_require_encryption`).
-4. **Copy.** Files are copied by the kernel (`copyfile`, or a clone when
-   source and backup share an APFS volume) to a temporary name, flushed,
-   and renamed into place, so an interrupted copy never leaves a
-   half-written file behind. Permissions, modification times and extended
-   attributes are preserved, sparse files stay sparse and compressed files
-   stay compressed. Symlinks are copied as links and never followed, and a
-   source file that changed into a link since the scan is not copied.
-   When an entry changes type (a file becomes a folder, say), the new one
-   is built under a temporary name and only then takes the old one's
-   place.
-5. **Delete, then finalize.** Deletions run after the copy phase. A source
-   file or folder that could not be read keeps its existing backup, so a
-   read error never looks like a deletion. At the end the drive's cache is
-   flushed once.
-
-Every run is recorded in `~/.local/state/bupr/history.jsonl`, which respects
-`$XDG_STATE_HOME`. `bupr log` and the menu read from it.
-
-### Running unattended
-
-bupr doesn't prompt when it runs with `--yes`, or when it has no terminal
-(cron, launchd, pipes). It then always takes the safe choice:
-
-- deletions over the limit are skipped and logged,
-- an unfamiliar folder is left alone,
-- it prints plain progress lines instead of the dashboard.
-
-Exit codes:
-
-| Code | Meaning |
-|---|---|
-| `0` | Success. |
-| `1` | Finished, but with file errors or skipped deletions. |
-| `2` | Aborted, interrupted, or not run (for example, drive not mounted or bad config). |
-
-With several presets, the exit code is the highest of them.
+   - starts with too little free space,
+   - copies secret files to a drive that isn't known to be encrypted
+     (with `secrets_require_encryption`).
+4. **Copy.** macOS copies each file to a temporary name, which is then
+   renamed into place, so an interrupted copy never leaves a half-written
+   file behind. Permissions, modification times and extended attributes
+   are kept, and sparse and compressed files stay that way. Symlinks are
+   copied as links and never followed. When something changes type (a
+   file becomes a folder, say), the new version is built first and only
+   then replaces the old one.
+5. **Delete, then finalize.** Deletions run after copying. A file or
+   folder bupr couldn't read in the source keeps its existing backup, so a
+   read error is never mistaken for a deletion. Finally the drive's cache
+   is flushed.
 
 Ctrl-C stops a run cleanly after the current chunk. The partial file is
-removed and nothing is deleted. Press Ctrl-C a second time to quit
-immediately.
-
-Only one run at a time can use a destination: a second `bupr` for the same
-folder (a manual run overlapping launchd, say) stops with exit code 2.
+removed and nothing is deleted. Press Ctrl-C again to quit immediately.
 
 ## Safety
 
-bupr writes only inside the running preset's destination folder. It
-never changes anything else; everywhere outside that folder it only reads.
-The one exception is its own config and history files. Independent layers
+bupr writes only inside the running preset's destination folder. It never
+changes anything else; everywhere outside that folder it only reads. The
+exceptions are its own config, history and lock files. Independent layers
 enforce this:
 
-- **Kernel sandbox.** The copying runs in a separate worker process under
-  a macOS sandbox profile, which lets it write only to the destination,
+- **Kernel sandbox.** Copying runs in a separate worker process under a
+  macOS sandbox profile. The worker can write only to the destination,
   read file contents only in the source, the destination and system
-  libraries, and never use the network. Dry runs and simulations deny all
-  writes.
+  libraries, and never use the network. Dry runs and simulations can't
+  write at all.
 - **Capability-based file access.** All writes go through a
   [`cap-std`](https://github.com/bytecodealliance/cap-std) handle on the
-  destination folder. That handle refuses `..`, absolute paths, and
-  symlinks that point outside the folder, including a symlink swapped in
-  during a run.
+  destination folder. It refuses `..`, absolute paths, and symlinks that
+  point outside the folder, even one swapped in during a run.
 - **Compile-time ban.** Clippy forbids every file-writing API outside two
-  small modules, and a test checks that no other module opts out.
+  small modules, and a test makes sure no other module opts out.
 - **Destination checks.** bupr refuses a destination that:
   - is a system folder or inside one (`/usr/local`, `/Library/…`),
   - is your home folder or one of its parents,
   - is a bare volume root,
   - is on a drive that isn't mounted,
   - overlaps the source or another preset's destination, however the
-    paths are spelled (symlinks, case).
+    paths are spelled (symlinks, upper or lower case).
 - **Ownership marker.** bupr only mirror-deletes inside a folder that holds
   its `.bupr-dest` marker for that preset. It never deletes a folder that
   belongs to another preset.
+- **Identity checks.** Before deleting or replacing anything, bupr checks
+  that it is still the same file the scan saw. A source file that turned
+  into a symlink since the scan is not copied.
 - **Case and Unicode aware.** Names are matched the way APFS matches them,
-  with Unicode normalization and full case folding, so `README.md` →
-  `Readme.md` or `strasse` → `straße` is treated as a rename. Before each
-  deletion, bupr also checks the file's identity once more.
+  so renaming `README.md` → `Readme.md` or `strasse` → `straße` is handled
+  as a rename, not as a delete and a copy.
 - **Other filesystems are left alone.** A disk image or volume mounted
-  inside the destination is never written to or deleted.
+  inside the source is skipped (with a warning), and one mounted inside
+  the destination is never written to or deleted.
 
 The test suite checks all of this. It includes adversarial tests for
-symlink escapes, a folder swapped mid-run, hostile file names and a drive
-unplugged mid-run. Every test also checks that a sentinel folder outside
-the destination is byte-identical afterwards.
+symlink escapes, folders swapped mid-run, hostile file names, a drive
+unplugged mid-run and a drive that fills up. Every test also checks that a
+sentinel folder outside the destination is left byte-identical.
+
+## Restoring
+
+A backup is an ordinary folder with the same layout as the source, plus a
+small `.bupr-dest` marker file. There is no special format and no restore
+command: copy files back with Finder, or with `ditto`, which keeps
+permissions and extended attributes:
+
+```sh
+ditto /Volumes/Backup/dev/webshop ~/dev/webshop
+```
 
 ## Limitations
 
-- macOS only. The tool relies on APFS, `sandbox-exec`, `diskutil` and
-  extended attributes.
-- It backs up to local and external drives only. There is no ssh or
-  network destination yet.
+- macOS only. bupr relies on APFS, `sandbox-exec`, `diskutil` and extended
+  attributes.
+- Local and external drives only. There is no ssh or network destination
+  yet.
 - Mirror mode only: a file deleted from the source is also deleted from the
-  backup. Pair bupr with Time Machine or snapshots if you need to go back
-  in time.
-- Changes are detected by size, modification time and (on APFS and HFS+)
-  permissions and extended attributes, not checksums.
+  backup. Pair bupr with Time Machine or APFS snapshots if you need to go
+  back in time.
+- Changes are detected from file metadata, not checksums.
 - Hard links are copied as separate files. ACLs and ownership are not
   copied.
 
@@ -298,7 +545,8 @@ the destination is byte-identical afterwards.
 ```
 
 The tests need macOS. The sandbox tests run `sandbox-exec` and skip
-themselves if it isn't available.
+themselves if it isn't available, and a few tests attach small disk images
+with `hdiutil`.
 
 ## License
 
