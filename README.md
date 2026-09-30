@@ -61,13 +61,19 @@ to set up recurring backups with bupr.
 
 ## Install
 
-You need macOS and a [Rust toolchain](https://rustup.rs) (1.88 or newer).
+With [Homebrew](https://brew.sh), on Apple silicon or Intel Macs:
+
+```sh
+brew install dfallman/tap/bupr
+```
+
+Or build it with a [Rust toolchain](https://rustup.rs) (1.88 or newer):
 
 ```sh
 cargo install --git https://github.com/dfallman/bupr
 ```
 
-Or build it from a clone:
+Or from a clone:
 
 ```sh
 git clone https://github.com/dfallman/bupr
