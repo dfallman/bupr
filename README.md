@@ -3,7 +3,7 @@
 **Preset-based mirror backups for the macOS termial**
 
 Bupr allows you to quickly and safely mirror folders in macOS. A typical use scenario is to backup 
-a folder structure on your internal storage to an external drive or a mounted NAS devices.
+a folder structure on your internal storage to an external drive or a mounted NAS device.
 
 Bupr is preset-based, meaning that instead of writing long shell commands at the 
 prompt, you describe each backup job once in a small TOML file, then run it by name each time
