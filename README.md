@@ -535,26 +535,15 @@ ditto /Volumes/Backup/dev/webshop ~/dev/webshop
 
 ## Limitations
 
-- macOS only. bupr relies on APFS, `sandbox-exec`, `diskutil` and extended
-  attributes.
-- Local and external drives only. There is no ssh or network destination
-  yet.
-- Mirror mode only: a file deleted from the source is also deleted from the
+- Bupr is **macOS only**. It relies on APFS, `sandbox-exec`, `diskutil`, and extended
+  attributes for safe operations and is not compatible with Linux or Windows.
+- Bupr mirrors files to local and external drives only, it does not support `ssh` or network destinations, although support for this might come in later releases. To mirror a folder to your NAS, mount the NAS in macOS.
+- **Mirror mode only**: a file deleted from the source is also deleted from the
   backup. Pair bupr with Time Machine or APFS snapshots if you need to go
   back in time.
 - Changes are detected from file metadata, not checksums.
 - Hard links are copied as separate files. ACLs and ownership are not
   copied.
-
-## Development
-
-```sh
-./scripts/check.sh    # cargo fmt --check, clippy -D warnings, cargo test
-```
-
-The tests need macOS. The sandbox tests run `sandbox-exec` and skip
-themselves if it isn't available, and a few tests attach small disk images
-with `hdiutil`.
 
 ## License
 
