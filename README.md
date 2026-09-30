@@ -1,6 +1,6 @@
 # bupr
 
-**Preset-based mirror backups for macOS.**
+**A preset-based mirror backups for the macOS termial**
 
 Type `bupr dev` and your `~/dev` folder is mirrored to your backup drive.
 The gigabytes of `target/`, `node_modules/` and `.build/` output that your
