@@ -9,20 +9,9 @@ Bupr is preset-based, meaning that instead of writing long shell commands at the
 prompt, you describe each backup job once in a small [TOML file](#configuration), then use the 
 preset's name each time you want to run the job.
 
-```
-$ bupr dev
-bupr · dev  ~/dev → /Volumes/Backup/dev
-  8,214 files (5.4 GB) to copy · 12 to delete · 96,110 unchanged
-╭ bupr · dev ────────────────────────────────────── mirror ╮
-│ ███████████████████░░░░░░░░░░░░░░  57%   3.1 GB / 5.4 GB │
-│ files 8,214/14,002   142.0 MB/s   0:22 → eta 0:17        │
-│ unchanged 96,110   deleted 12   errors 0                 │
-│                                                          │
-│ ▸ webshop/src/lib/components/Timeline.svelte     48.0 kB │
-│   player/core/src/decoder.rs                     12.0 kB │
-│   player/api/openapi.yaml                         3.0 kB │
-╰──────────────────────────────────────────────────────────╯
-```
+<p align="center">
+  <img width="600" alt="carbon" src="https://github.com/user-attachments/assets/c5477f72-6a13-4eb2-ab10-089a0355e7b9" />
+</p>
 
 ### Typical usage scenario
 You type `bupr dev` at the prompt and your 'dev' preset job runs, 
