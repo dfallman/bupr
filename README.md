@@ -91,9 +91,12 @@ bupr dev --dry-run -v  # see exactly what would be copied and deleted
 bupr dev               # back up for real
 ```
 
-Prefer to be asked questions? `bupr new` walks you through creating a
-preset. It completes folder names as you type and checks the destination
-while you enter it.
+Prefer to be asked questions? 
+
+```bupr new``` 
+
+This command walks you through creating a preset. It completes folder names as 
+you type (try with `Tab`) and checks the destination while you enter it. 
 
 ## Examples
 
