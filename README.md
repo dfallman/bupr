@@ -34,7 +34,7 @@ want to backup. Bupr [makes it easy to exclude the files you don't want](#config
 meaning that folders such as `target/`, `debug/`, `node_modules/` and `.build/` can be left out. 
 
 Bupr implements [several safety layers](#safety) to ensure safe file operations. It's written in Rust 
-and have no external dependencies. By design, bupr is a CLI utility and does not by itself
+from the ground up and does not depend on external applications such as `rsync`. By design, bupr is a CLI utility and does not by itself
 have mechanisms for scheduling backups. However, you can use [launchd](#nightly-backups-with-launchd) 
 to set up recurring backups with bupr.
 
