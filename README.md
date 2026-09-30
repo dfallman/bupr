@@ -7,15 +7,7 @@ storage to an external drive or a mounted NAS devices.
 
 Bupr is preset-based, meaning that instead of writing long shell commands at the 
 prompt, you describe each backup job once in a small TOML file, then run it by name each time
-you want to run each job.
-
-Example: type `bupr dev` and your 'dev' preset mirrors your `~/dev` folder to 
-a specified backup drive. Bupr allows you to exclude file types and folders for each present, 
-meaning that gigabytes of `target/`, `debug/`, `node_modules/` and `.build/` output that your
-tools can regenerate (and you don't want to backup) can be left out. 
-
-Bupr uses macOS's sandboxing mechanism to ensure only the destination folder specified in each 
-preset can be written to. It's written in Rust and have no external dependencies.
+you want to run the job.
 
 ```
 $ bupr dev
@@ -31,6 +23,17 @@ bupr · dev  ~/dev → /Volumes/Backup/dev
 │   player/api/openapi.yaml                         3.0 kB │
 ╰──────────────────────────────────────────────────────────╯
 ```
+
+### Example
+Type `bupr dev` and your 'dev' preset job runs, mirroring your `~/dev` folder to 
+your external USB backup drive. 
+
+Bupr allows you to exclude file types and folders for each present, 
+meaning that gigabytes of `target/`, `debug/`, `node_modules/` and `.build/` output that your
+tools can regenerate can be left out. 
+
+Bupr uses macOS's sandboxing mechanism to ensure only the destination folder specified in each 
+preset can be written to. It's written in Rust and have no external dependencies.
 
 Run `bupr` without arguments to pick a preset from a menu.
 
