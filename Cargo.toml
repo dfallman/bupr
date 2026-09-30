@@ -1,6 +1,6 @@
 [package]
 name = "bupr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Preset-based mirror backups for macOS, with project-aware excludes and a kernel-sandboxed copier"
 license = "MIT"
