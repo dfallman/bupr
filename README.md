@@ -249,16 +249,49 @@ $ bupr photos
 ✗ photos · drive not mounted: /Volumes/Archive is not available
 ```
 
-### Rehearse a big run
+### Preview a run: `--dry-run` or `--simulate`
 
-`--simulate` does everything a real run does, including reading every
-file with the live dashboard, but writes nothing. It is useful to check
-read speed, or to see whether any file is unreadable before the first large
-backup.
+Neither changes anything on the backup drive. The difference is how much
+work they do.
+
+**`--dry-run` plans the backup and stops.** It scans the source and the
+backup and works out what would be copied and deleted. It prints that plan
+and exits, without asking any questions or reading any file contents, so
+it is fast even for huge folders. Add `-v` to list every path it would
+touch.
+
+**`--simulate` goes through the whole run except the writes.** It asks the
+same questions a real run would, such as the prompt for deleting more than
+the limit. It then opens and reads every file it would copy, with the live
+dashboard showing speed and ETA, and discards the bytes. It counts
+deletions instead of performing them. The copy worker runs under a sandbox
+profile that denies all writes, so the kernel guarantees nothing is
+written; the backup folder isn't even created. Because it really reads the
+data, it takes about as long as the reading part of a real backup. It also
+finds problems a dry run can't see: files you don't have permission to
+read, disk read errors, and the real throughput.
+
+| | `--dry-run` | `--simulate` |
+|---|---|---|
+| Shows the plan | yes (`-v` for every path) | summary line, then the dashboard |
+| Asks the usual questions | no | yes |
+| Reads file contents | no | yes, every file to be copied |
+| Finds unreadable files and read errors | only folders it can't list | yes |
+| Realistic speed and ETA | no | yes |
+| Writes anything | no | no (enforced by the sandbox) |
+| Recorded in `bupr log` | yes, marked "(dry run)" | yes, marked "(simulated)" |
+
+Use `--dry-run` to check what a change to your excludes or rules would do.
+Use `--simulate` before a first large backup, to find unreadable files and
+see how long it will take:
 
 ```sh
+bupr dev --dry-run -v
 bupr photos --simulate
 ```
+
+Neither counts as the preset's last run in `bupr list` or the menu, and the
+two flags can't be combined.
 
 ### Nightly backups with launchd
 
@@ -447,6 +480,9 @@ bupr init                  write a starter config
 
 Global flags: `--config <path>`, `--yes` (never prompt; always take the
 safe choice), `--quiet`, `--no-color`.
+
+For when to use `--dry-run` and when `--simulate`, see
+[Preview a run](#preview-a-run---dry-run-or---simulate).
 
 Every run is recorded in `~/.local/state/bupr/history.jsonl` (respects
 `$XDG_STATE_HOME`), which `bupr log` and the menu read.
