@@ -10,7 +10,7 @@ prompt, you describe each backup job once in a small [TOML file](#configuration)
 preset's name each time you want to run the job.
 
 <p align="center">
-  <img width="600" alt="carbon" src="https://github.com/user-attachments/assets/c5477f72-6a13-4eb2-ab10-089a0355e7b9" />
+  <img width="600" alt="bupr" src="https://github.com/user-attachments/assets/4ff7956b-3add-4071-98c1-f7ca261fb5fd" />
 </p>
 
 ### Typical usage scenario
