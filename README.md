@@ -211,6 +211,12 @@ source      = "~/dev"
 destination = "/Volumes/Backup/dev"
 rules       = ["dev"]
 
+[presets.studio]
+description = "Video and music projects"
+source      = "~/Movies/Projects"
+destination = "/Volumes/Archive/projects"
+rules       = ["junk", "video", "music"]
+
 [presets.photos]
 description = "Photos library"
 source      = "~/Pictures"
@@ -409,7 +415,7 @@ lists presets in the order they appear in the file. Only `source` and
 | `description` | — | Shown in the menu and in `bupr list`. |
 | `source` | *(required)* | The folder to back up. `~` is expanded. |
 | `destination` | *(required)* | The backup folder. It must be a subfolder on a mounted drive, never a volume root. |
-| `rules` | `["junk"]` | Built-in rule packs: `dev`, `junk`, or `[]` to copy everything. |
+| `rules` | `["junk"]` | Built-in rule packs: `dev`, `junk`, `video`, `music`, or `[]` to copy everything. |
 | `exclude` | `[]` | Extra patterns to skip, in `.gitignore` style. |
 | `include` | `[]` | Patterns that are always backed up, even if a rule or exclude matches them. |
 | `max_delete` | `200` | Ask before deleting more entries than this in one run. |
@@ -456,6 +462,32 @@ Run `bupr rules` for the full list.
 | `.gradle/`, `Pods/`, `vendor/` | Gradle files, `Podfile`, `composer.json` |
 | `.venv/`, `venv/` | `pyproject.toml`, `requirements.txt` or `setup.py` |
 | `DerivedData/`, `__pycache__/`, `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/` | *(always)* |
+
+- **`video`** skips render and audio caches that Final Cut Pro and
+  Premiere Pro rebuild from the project:
+
+| Skipped | …only when next to |
+|---|---|
+| `Render Files/`, `Analysis Files/` (Final Cut Pro) | `CurrentVersion.fcpevent` (in each event folder of a library) |
+| `Adobe Premiere Pro Video Previews/`, `Adobe Premiere Pro Audio Previews/` | `*.prproj` |
+| `*.pek`, `*.cfa` (Adobe peak and conformed-audio files) | *(always)* |
+
+- **`music`** skips fade and waveform caches:
+
+| Skipped | …only when next to |
+|---|---|
+| `Fade Files/`, `WaveCache.wfm` (Pro Tools) | `*.ptx` or `*.ptf` |
+| `Images/` (Cubase, Nuendo) | `*.cpr` |
+| `*.reapeaks` (Reaper) | *(always)* |
+
+`video` and `music` don't include `junk`, so list it too:
+`rules = ["junk", "video"]`. Both packs deliberately keep Final Cut Pro
+proxies and optimized media, and all freeze files. Those can only be
+rebuilt while the original media, or the same plugins, are still around.
+Ableton's `.asd` files are kept too, because they can hold saved warp
+markers. Caches in their default locations under `~/Library` or
+`~/Movies` (Premiere's media cache, DaVinci Resolve's `CacheClip`) are
+outside most sources anyway.
 
 **bupr never uses `.gitignore` to skip anything.** People gitignore
 private but important files, such as `.env`, agent notes (`CLAUDE.md`,

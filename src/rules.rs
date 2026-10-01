@@ -17,15 +17,24 @@ use crate::relpath::RelPath;
 pub enum RulePack {
     Dev,
     Junk,
+    Video,
+    Music,
 }
 
 impl RulePack {
-    pub const ALL: [RulePack; 2] = [RulePack::Dev, RulePack::Junk];
+    pub const ALL: [RulePack; 4] = [
+        RulePack::Dev,
+        RulePack::Junk,
+        RulePack::Video,
+        RulePack::Music,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             RulePack::Dev => "dev",
             RulePack::Junk => "junk",
+            RulePack::Video => "video",
+            RulePack::Music => "music",
         }
     }
 
@@ -33,6 +42,10 @@ impl RulePack {
         match self {
             RulePack::Dev => "build output and dependencies of common toolchains (includes junk)",
             RulePack::Junk => "OS clutter: .DS_Store, AppleDouble files, editor swap files",
+            RulePack::Video => {
+                "render, analysis, and audio caches of Final Cut Pro and Premiere Pro"
+            }
+            RulePack::Music => "fade and waveform caches of Pro Tools, Cubase, and Reaper",
         }
     }
 }
@@ -89,6 +102,9 @@ const fn rule(
 
 const NODE: &[&str] = &["package.json"];
 const PYTHON: &[&str] = &["pyproject.toml", "requirements.txt", "setup.py"];
+const FCP_EVENT: &[&str] = &["CurrentVersion.fcpevent"];
+const PREMIERE: &[&str] = &["*.prproj"];
+const PRO_TOOLS: &[&str] = &["*.ptx", "*.ptf"];
 
 pub const RULES: &[RuleDef] = &[
     rule(RulePack::Junk, ".DS_Store", Applies::File, &[]),
@@ -146,6 +162,29 @@ pub const RULES: &[RuleDef] = &[
     rule(RulePack::Dev, ".pytest_cache", Applies::Dir, &[]),
     rule(RulePack::Dev, ".mypy_cache", Applies::Dir, &[]),
     rule(RulePack::Dev, ".ruff_cache", Applies::Dir, &[]),
+    // Only caches the app rebuilds from the project itself. Proxies,
+    // optimized media and freeze files are kept: rebuilding them needs the
+    // original media or the same plugins, which may be gone.
+    rule(RulePack::Video, "Render Files", Applies::Dir, FCP_EVENT),
+    rule(RulePack::Video, "Analysis Files", Applies::Dir, FCP_EVENT),
+    rule(
+        RulePack::Video,
+        "Adobe Premiere Pro Video Previews",
+        Applies::Dir,
+        PREMIERE,
+    ),
+    rule(
+        RulePack::Video,
+        "Adobe Premiere Pro Audio Previews",
+        Applies::Dir,
+        PREMIERE,
+    ),
+    rule(RulePack::Video, "*.pek", Applies::File, &[]),
+    rule(RulePack::Video, "*.cfa", Applies::File, &[]),
+    rule(RulePack::Music, "Fade Files", Applies::Dir, PRO_TOOLS),
+    rule(RulePack::Music, "WaveCache.wfm", Applies::File, PRO_TOOLS),
+    rule(RulePack::Music, "Images", Applies::Dir, &["*.cpr"]),
+    rule(RulePack::Music, "*.reapeaks", Applies::File, &[]),
 ];
 
 pub const BUILTIN_SECRETS: &[&str] = &[
@@ -160,15 +199,9 @@ pub const BUILTIN_SECRETS: &[&str] = &[
 
 /// Rules active for a preset; `dev` implies `junk`.
 pub fn rules_for(packs: &[RulePack]) -> Vec<&'static RuleDef> {
-    let dev = packs.contains(&RulePack::Dev);
-    let junk = dev || packs.contains(&RulePack::Junk);
-    RULES
-        .iter()
-        .filter(|r| match r.pack {
-            RulePack::Dev => dev,
-            RulePack::Junk => junk,
-        })
-        .collect()
+    let active =
+        |p: RulePack| packs.contains(&p) || (p == RulePack::Junk && packs.contains(&RulePack::Dev));
+    RULES.iter().filter(|r| active(r.pack)).collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,6 +548,86 @@ mod tests {
     }
 
     #[test]
+    fn video_caches_need_their_project() {
+        let f = filter(&[RulePack::Video], &[], &[]);
+        let event = &["CurrentVersion.fcpevent", "Original Media", "Render Files"];
+        for d in ["Render Files", "Analysis Files"] {
+            assert!(
+                excluded(dec(&f, &format!("L.fcpbundle/E/{d}"), true, event, false)),
+                "{d}"
+            );
+            assert_eq!(
+                dec(&f, &format!("x/{d}"), true, &[d], false),
+                Decision::Include
+            );
+        }
+        for d in ["Original Media", "Transcoded Media", "Shared Items"] {
+            assert_eq!(
+                dec(&f, &format!("L.fcpbundle/E/{d}"), true, event, false),
+                Decision::Include
+            );
+        }
+        let premiere = &["cut.prproj", "Adobe Premiere Pro Auto-Save"];
+        for d in [
+            "Adobe Premiere Pro Video Previews",
+            "Adobe Premiere Pro Audio Previews",
+        ] {
+            assert!(
+                excluded(dec(&f, &format!("p/{d}"), true, premiere, false)),
+                "{d}"
+            );
+            assert_eq!(
+                dec(&f, &format!("p/{d}"), true, &[], false),
+                Decision::Include
+            );
+        }
+        assert_eq!(
+            dec(&f, "p/Adobe Premiere Pro Auto-Save", true, premiere, false),
+            Decision::Include
+        );
+        assert!(excluded(dec(&f, "m/clip.mov.pek", false, &[], false)));
+        assert!(excluded(dec(&f, "m/clip.mov 48000.cfa", false, &[], false)));
+        assert_eq!(dec(&f, "a/.DS_Store", false, &[], false), Decision::Include);
+    }
+
+    #[test]
+    fn music_caches_need_their_session() {
+        let f = filter(&[RulePack::Music], &[], &[]);
+        let pt = &["song.ptx", "Audio Files", "Session File Backups"];
+        assert!(excluded(dec(&f, "s/Fade Files", true, pt, false)));
+        assert!(excluded(dec(&f, "s/WaveCache.wfm", false, pt, false)));
+        assert!(excluded(dec(&f, "s/Fade Files", true, &["old.ptf"], false)));
+        for d in ["Audio Files", "Session File Backups", "Bounced Files"] {
+            assert_eq!(
+                dec(&f, &format!("s/{d}"), true, pt, false),
+                Decision::Include
+            );
+        }
+        assert_eq!(dec(&f, "x/Fade Files", true, &[], false), Decision::Include);
+        assert!(excluded(dec(
+            &f,
+            "c/Images",
+            true,
+            &["song.cpr", "Audio"],
+            false
+        )));
+        assert_eq!(
+            dec(&f, "c/Images", true, &["index.html"], false),
+            Decision::Include
+        );
+        assert_eq!(
+            dec(&f, "c/Edits", true, &["song.cpr"], false),
+            Decision::Include
+        );
+        assert!(excluded(dec(&f, "r/vox.wav.reapeaks", false, &[], false)));
+        // Ableton .asd files hold saved warp markers, so they are kept.
+        assert_eq!(
+            dec(&f, "a/kick.wav.asd", false, &[], false),
+            Decision::Include
+        );
+    }
+
+    #[test]
     fn no_packs_includes_everything() {
         let f = filter(&[], &[], &[]);
         assert_eq!(dec(&f, "a/.DS_Store", false, &[], false), Decision::Include);
@@ -687,7 +800,20 @@ mod tests {
                 .iter()
                 .all(|r| r.pack == RulePack::Junk)
         );
-        assert_eq!(rules_for(&[RulePack::Dev]).len(), RULES.len());
+        let dev = rules_for(&[RulePack::Dev]);
+        assert!(dev.iter().any(|r| r.pack == RulePack::Junk));
+        assert!(
+            dev.iter()
+                .all(|r| matches!(r.pack, RulePack::Dev | RulePack::Junk))
+        );
+        for pack in [RulePack::Video, RulePack::Music] {
+            let rules = rules_for(&[pack]);
+            assert!(!rules.is_empty());
+            assert!(
+                rules.iter().all(|r| r.pack == pack),
+                "{pack:?} implies nothing"
+            );
+        }
         assert_eq!(Reason::Exclude("*.log".into()).label(), "exclude *.log");
     }
 }

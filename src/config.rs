@@ -363,6 +363,14 @@ mod tests {
         assert!(
             parse("[presets.d]\nsource=\"/a\"\ndestination=\"/b\"\nrules=[\"rust\"]\n").is_err()
         );
+        let media = parse(
+            "[presets.d]\nsource=\"/a\"\ndestination=\"/b\"\nrules=[\"junk\", \"video\", \"music\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            media.get("d").unwrap().rules,
+            vec![RulePack::Junk, RulePack::Video, RulePack::Music]
+        );
         assert!(
             parse("[presets.d]\nsource=\"/a\"\ndestination=\"/b\"\nexclude=[\"a[\"]\n").is_err()
         );
