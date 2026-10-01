@@ -30,6 +30,7 @@ to set up recurring backups with bupr.
 ## Contents
 
 - [Why bupr?](#why-bupr)
+- [What bupr is and isn't](#what-bupr-is-and-isnt)
 - [Install](#install)
 - [Quick start](#quick-start)
 - [Examples](#examples)
@@ -58,6 +59,72 @@ to set up recurring backups with bupr.
 - **Safety comes first.** bupr can only write inside the preset's
   destination folder, and several independent layers enforce that. See
   [Safety](#safety).
+
+## What bupr is and isn't
+
+bupr does one thing: it makes a folder on another drive look exactly like
+a folder on your Mac, minus the files your tools can regenerate. It is a
+**one-way mirror of the current state**. It is not a versioned backup, a
+sync service, or a disk cloner. It works well as one layer of a backup
+setup, not as the whole of it.
+
+### Compared with `cp`, `ditto`, and `rsync`
+
+- **`cp -R`** and a **Finder** copy copy everything every time. They never
+  remove files that are gone from the source, so the copy drifts away from
+  the original, and they can't skip anything.
+- **`ditto`** keeps Mac metadata well and is what we suggest for
+  [restoring](#restoring). Like `cp`, it doesn't mirror deletions, and it
+  has no excludes.
+- **`rsync`** is the closest tool. On recent macOS, `/usr/bin/rsync` is
+  `openrsync`, which is compatible with rsync 2.6.9. rsync does several
+  things bupr doesn't: it copies over SSH, compares checksums, keeps hard
+  links, makes dated snapshots with `--link-dest`, runs on Linux, and is
+  already installed everywhere. What bupr adds is excludes that depend on
+  context (`target/` only next to `Cargo.toml`, which an rsync pattern
+  can't say), checks that refuse a wrong or dangerous destination, a
+  prompt before large deletions, a kernel sandbox around the copying, APFS
+  clones, and a live dashboard. With rsync, a wrong path and `--delete`
+  can empty the folder you meant to protect.
+- **Carbon Copy Cloner, SuperDuper!, ChronoSync, and FreeFileSync** are
+  GUI apps that cover more ground: scheduling, two-way sync (ChronoSync,
+  FreeFileSync), snapshots on the destination (Carbon Copy Cloner), and
+  rule editors. Several are paid. If you want a window and a scheduler
+  rather than a terminal, use one of them.
+
+### Compared with Time Machine, Backblaze, and Arq
+
+Those are **backup systems**. They keep many versions over time, so you
+can get back a file you deleted or overwrote last week. Backblaze and Arq
+also keep a copy off-site, which survives a fire or theft that takes your
+Mac and its drive together.
+
+bupr keeps **no history**. When you delete or damage a file and then run
+bupr, the backup changes to match: the file is deleted, or the damaged
+version replaces the good one. The prompts before large deletions and
+`--dry-run` help, but they are no substitute for versions. What you get
+instead is a plain folder you can browse in Finder and restore by
+copying, with no app or archive format in between, and a backup that
+leaves out gigabytes of regenerable files.
+
+Use bupr **alongside** a backup system, not instead of one. For example,
+keep Time Machine or Backblaze for history and off-site copies, and use
+bupr for a fast, lean mirror of your projects on a drive you carry.
+
+### Compared with iCloud Drive, Dropbox, OneDrive, and Google Drive
+
+Cloud storage **syncs**, and sync is not a backup. A deletion, a damaged
+file, or ransomware reaches every synced device within minutes. Version
+history and recently deleted files help, but only for a limited time.
+Sync is also a poor fit for developer folders: syncing `node_modules/`
+or `target/` uploads thousands of files that are rebuilt locally anyway.
+
+bupr can back up a folder that lives in cloud storage, but it is not
+tested with **online-only files** (iCloud's Optimize Mac Storage,
+Dropbox's online-only files). Those files have no data on your Mac, and
+bupr doesn't handle them specially. Before backing up such a folder,
+make it available offline (“Keep Downloaded” in iCloud Drive, “Make
+available offline” in Dropbox).
 
 ## Install
 Note that bupr is a macOS only application, it does not work on Linux and Windows.
@@ -612,7 +679,9 @@ ditto /Volumes/Backup/dev/webshop ~/dev/webshop
 - Bupr mirrors files to local and external drives only, it does not support `ssh` or network destinations, although support for this might come in later releases. To mirror a folder to your NAS, mount the NAS in macOS.
 - **Mirror mode only**: a file deleted from the source is also deleted from the
   backup. Pair bupr with Time Machine or APFS snapshots if you need to go
-  back in time.
+  back in time. See [What bupr is and isn't](#what-bupr-is-and-isnt).
+- Online-only files from iCloud Drive or Dropbox are not handled specially
+  and have not been tested. Download them before a run.
 - Changes are detected from file metadata, not checksums.
 - Hard links are copied as separate files. ACLs and ownership are not
   copied.
