@@ -35,6 +35,7 @@ to set up recurring backups with bupr.
 - [Quick start](#quick-start)
 - [Examples](#examples)
 - [Configuration](#configuration)
+- [Cloud storage folders](#cloud-storage-folders)
 - [Commands](#commands)
 - [How a run works](#how-a-run-works)
 - [Safety](#safety)
@@ -119,23 +120,9 @@ history and recently deleted files help, but only for a limited time.
 Sync is also a poor fit for developer folders: syncing `node_modules/`
 or `target/` uploads thousands of files that are rebuilt locally anyway.
 
-bupr can back up a folder that lives in cloud storage. **Online-only
-files** (iCloud's Optimize Mac Storage, Dropbox's online-only files) have
-no data on your Mac, and reading one makes macOS download it and keep it
-downloaded. So by default bupr skips the ones it would have to copy and
-lists each of them after the run:
-
-```
-✓ dropbox · 120 files (2.1 GB) copied, 0 deleted, 8,412 unchanged, 3 online-only skipped · 0:41
-    ○ Taxes/2025.pdf skipped (online-only; set online_only = "download" to back it up)
-```
-
-A skipped file's existing backup is kept as it is, and an online-only file
-whose backup is already current counts as unchanged. To back them up,
-make the folder available offline (“Keep Downloaded” in iCloud Drive,
-“Make available offline” in Dropbox), or set `online_only = "download"` in
-the preset to let bupr download them during the run. Both are tested
-with Dropbox; iCloud Drive is untested.
+bupr can back up a folder inside cloud storage, as long as it lives on
+your Mac. Online-only files, which the cloud app keeps only in the cloud,
+are skipped by default. See [Cloud storage folders](#cloud-storage-folders).
 
 ## Install
 Note that bupr is a macOS only application, it does not work on Linux and Windows.
@@ -501,7 +488,7 @@ lists presets in the order they appear in the file. Only `source` and
 | `secrets` | `[]` | Extra secret-file patterns, for the unencrypted-drive warning. |
 | `secrets_require_encryption` | `false` | Ask before copying secret files to a drive not known to be encrypted. Unattended runs abort instead. |
 | `allow_internal` | `false` | Allow a destination on the internal disk. |
-| `online_only` | `"skip"` | Online-only iCloud Drive and Dropbox files: `"skip"` leaves them online and lists them after the run; `"download"` lets macOS download them (they stay downloaded). See [cloud storage](#compared-with-icloud-drive-dropbox-onedrive-and-google-drive). |
+| `online_only` | `"skip"` | What to do with cloud files that aren't on your Mac: `"skip"` leaves them alone and lists them after the run, `"download"` downloads them so they can be copied. See [Cloud storage folders](#cloud-storage-folders). |
 
 Unknown keys are an error, so a typo such as `exlude` can't silently turn
 off an exclude. `bupr edit` checks the file before saving it.
@@ -572,6 +559,90 @@ outside most sources anyway.
 private but important files, such as `.env`, agent notes (`CLAUDE.md`,
 `.claude/`) and local databases. `bupr audit` uses `.gitignore` only to
 suggest excludes, and you decide.
+
+## Cloud storage folders
+
+bupr can back up a folder inside iCloud Drive, Dropbox, or another cloud
+storage app. What needs care is **online-only files**: files the app
+keeps only in the cloud to save space on your Mac, such as iCloud Drive
+with Optimize Mac Storage turned on, or Dropbox files made online-only.
+Finder shows them with a cloud icon, but their data isn't on the disk.
+As soon as any program reads one, macOS downloads it, and it stays
+downloaded.
+
+### By default, online-only files are skipped
+
+With the default `online_only = "skip"`, bupr never reads an online-only
+file, so a run never downloads anything. This is the default because:
+
+- **Downloading changes your Mac.** bupr only ever writes inside the
+  backup folder. A download would still fill your internal disk, through
+  macOS rather than through bupr, on the side you never asked it to
+  touch.
+- **The files are online-only for a reason.** You, or macOS, freed that
+  space on purpose. Bringing every file back silently undoes that, and a
+  large cloud folder can fill the disk.
+- **Downloads make a run unpredictable.** They need a network connection
+  and can take a long time, which matters for a run on the go or a
+  [nightly job](#nightly-backups-with-launchd).
+
+What skipping means for your backup:
+
+- An online-only file whose backup is already up to date counts as
+  unchanged. Files you backed up before they went online-only stay backed
+  up and aren't reported.
+- An online-only file that is new, or changed since the last run, is not
+  copied. If the backup has an older version, that version is kept, never
+  deleted.
+- Each skipped file is listed after the run, and the summary line counts
+  them. The list shows the first 10; `bupr <preset> --dry-run -v` lists
+  all of them. Skipping doesn't change the exit code.
+- A file that goes online-only while bupr is running is reported as an
+  error, not downloaded.
+
+```
+✓ dropbox · 120 files (2.1 GB) copied, 0 deleted, 8,412 unchanged, 3 online-only skipped · 0:41
+    ○ Taxes/2025.pdf skipped (online-only; set online_only = "download" to back it up)
+    ○ Photos/trip.mov skipped (online-only; set online_only = "download" to back it up)
+    ○ Photos/trip-2.mov skipped (online-only; set online_only = "download" to back it up)
+```
+
+### Backing up online-only files
+
+There are two ways:
+
+- **Keep the folder downloaded** in the cloud app: “Keep Downloaded” in
+  iCloud Drive, or “Make available offline” in Dropbox. The files are
+  then ordinary files, and bupr backs them up like any other.
+- **Let bupr download them** by setting `online_only = "download"` in the
+  preset. Each file is downloaded just before it is copied. The plan says
+  how many files will be downloaded, and the space check counts them at
+  full size. Afterwards they stay downloaded on your Mac until the app or
+  macOS makes them online-only again.
+
+```toml
+[presets.dropbox]
+source      = "~/Library/CloudStorage/Dropbox"
+destination = "/Volumes/Backup/dropbox"
+online_only = "download"
+```
+
+To see which files in a folder are online-only, run `ls -l%` there.
+Online-only files have a `%` after the permissions.
+
+### Supported cloud apps
+
+bupr recognizes an online-only file by a flag macOS sets on it
+(`SF_DATALESS`). Apps built on Apple's File Provider framework use this
+flag. Except for iCloud Drive, these apps keep their folder in
+`~/Library/CloudStorage`.
+
+| App | Status |
+|---|---|
+| Dropbox | Supported, tested |
+| iCloud Drive | Same mechanism; expected to work, not tested yet |
+| OneDrive, Google Drive, Box, and other apps in `~/Library/CloudStorage` | Expected to work when their online-only files carry the flag; not tested |
+| Cloud storage mounted as a drive or network share (rclone mount, WebDAV, SMB, the older Google Drive File Stream under `/Volumes`) | **Not supported.** These files don't carry the flag, so bupr can't tell they aren't on your Mac, and copying them downloads them like any other read |
 
 ## Commands
 
@@ -692,9 +763,10 @@ ditto /Volumes/Backup/dev/webshop ~/dev/webshop
 - **Mirror mode only**: a file deleted from the source is also deleted from the
   backup. Pair bupr with Time Machine or APFS snapshots if you need to go
   back in time. See [What bupr is and isn't](#what-bupr-is-and-isnt).
-- Online-only files from iCloud Drive or Dropbox are skipped unless the
-  preset sets `online_only = "download"`. This is tested with Dropbox
-  only.
+- Online-only cloud files are skipped unless the preset sets
+  `online_only = "download"`. Only Dropbox is tested, and cloud storage
+  mounted as a drive isn't detected. See
+  [Cloud storage folders](#cloud-storage-folders).
 - Changes are detected from file metadata, not checksums.
 - Hard links are copied as separate files. ACLs and ownership are not
   copied.
