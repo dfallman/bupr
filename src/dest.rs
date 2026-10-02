@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use xattr::FileExt;
 
 use crate::relpath::RelPath;
-use crate::scan::{Kind, is_volatile_xattr};
+use crate::scan::{Kind, SF_DATALESS, is_volatile_xattr};
 use crate::{MARKER_NAME, TMP_PREFIX};
 
 pub(crate) const CHUNK: usize = 1 << 20;
@@ -541,6 +541,36 @@ pub struct Source {
     dev: u64,
 }
 
+unsafe extern "C" {
+    fn setiopolicy_np(iotype: c_int, scope: c_int, policy: c_int) -> c_int;
+}
+
+/// From then on, reading an online-only file (iCloud Drive, Dropbox) in
+/// this process fails with `EDEADLK` instead of making macOS download it.
+pub fn forbid_downloads() -> io::Result<()> {
+    const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: c_int = 3;
+    const IOPOL_SCOPE_PROCESS: c_int = 0;
+    const IOPOL_MATERIALIZE_DATALESS_FILES_OFF: c_int = 1;
+    // SAFETY: plain syscall wrapper taking integers.
+    let rc = unsafe {
+        setiopolicy_np(
+            IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
+            IOPOL_SCOPE_PROCESS,
+            IOPOL_MATERIALIZE_DATALESS_FILES_OFF,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The error of reading an online-only file with downloads forbidden.
+pub fn is_not_downloaded(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(libc::EDEADLK)
+}
+
 impl Source {
     pub fn open(root_path: &Path) -> io::Result<Source> {
         let root = Dir::open_ambient_dir(root_path, ambient_authority())?;
@@ -573,6 +603,17 @@ impl Source {
         let m = f.metadata()?;
         if !m.is_file() || m.ino() != ino || m.dev() != self.dev {
             return Err(changed_since_scan());
+        }
+        // An online-only file is downloaded before the copy takes its
+        // metadata: the download rewrites its mtime, and a copy stamped with
+        // the old one would be copied again next run.
+        if std::os::macos::fs::MetadataExt::st_flags(&m) & SF_DATALESS != 0 {
+            let mut byte = [0u8; 1];
+            // SAFETY: reads at most one byte into a live local buffer.
+            let n = unsafe { libc::pread(f.as_raw_fd(), byte.as_mut_ptr().cast(), 1, 0) };
+            if n < 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(f)
     }

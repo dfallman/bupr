@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
+use std::os::macos::fs::MetadataExt as _;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -47,7 +48,8 @@ pub struct Entry {
     pub rel: RelPath,
     pub kind: Kind,
     pub size: u64,
-    /// Bytes allocated on disk (less than `size` for sparse or compressed files).
+    /// Bytes allocated on disk (less than `size` for sparse or compressed
+    /// files). For an online-only file, the full size it takes once downloaded.
     pub alloc: u64,
     /// Seconds since the epoch.
     pub mtime: i64,
@@ -60,6 +62,10 @@ pub struct Entry {
     /// Fingerprint of a file's extended attributes (0 when it has none, or
     /// when it was not computed).
     pub xattrs: u64,
+    /// An online-only file (iCloud Drive, Dropbox): its data is not on this
+    /// Mac, and reading it makes macOS download it.
+    #[serde(default)]
+    pub dataless: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +121,10 @@ fn xattr_fingerprint(path: &Path) -> u64 {
     h.finish() | 1
 }
 
+/// `st_flags` bit of a file whose data is held by a File Provider (iCloud
+/// Drive, Dropbox) and not on disk. Not in the libc crate.
+pub const SF_DATALESS: u32 = 0x4000_0000;
+
 fn entry(
     rel: RelPath,
     kind: Kind,
@@ -123,17 +133,23 @@ fn entry(
     xattrs: u64,
 ) -> Entry {
     let file = kind == Kind::File;
+    let dataless = file && meta.st_flags() & SF_DATALESS != 0;
     Entry {
         rel,
         kind,
         size: if file { meta.len() } else { 0 },
-        alloc: if file { meta.blocks() * 512 } else { 0 },
+        alloc: match (file, dataless) {
+            (false, _) => 0,
+            (true, true) => meta.len(),
+            (true, false) => meta.blocks() * 512,
+        },
         mtime: meta.mtime(),
         mtime_nsec: meta.mtime_nsec() as u32,
         mode: meta.mode() & 0o7777,
         link_target,
         ino: meta.ino(),
         xattrs,
+        dataless,
     }
 }
 

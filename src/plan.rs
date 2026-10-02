@@ -17,6 +17,8 @@ pub struct CopyItem {
     pub alloc: u64,
     /// Source inode seen by the scan; the copy refuses a file that no longer matches.
     pub ino: u64,
+    /// Online-only source: reading it makes macOS download it first.
+    pub dataless: bool,
     /// Bytes allocated to the destination file this copy overwrites, freed
     /// once the copy is renamed over it.
     pub frees: u64,
@@ -93,6 +95,9 @@ pub struct Pins<'a> {
     pub keep: &'a [RelPath],
     /// Destination mount points: nothing is written at or below them.
     pub mounts: &'a [RelPath],
+    /// Leave online-only source files online: one that needs copying is not
+    /// read (that would download it), and its destination entry is kept.
+    pub leave_online: bool,
 }
 
 #[derive(Debug, Default)]
@@ -113,6 +118,8 @@ pub struct Plan {
     /// (source entry, reason): entries not written because a pinned
     /// destination path is in the way.
     pub blocked: Vec<(RelPath, &'static str)>,
+    /// Online-only source files left alone (`Pins::leave_online`), with sizes.
+    pub online_only: Vec<(RelPath, u64)>,
     pub totals: Totals,
 }
 
@@ -154,6 +161,7 @@ fn create(plan: &mut Plan, s: &Entry, frees: u64) {
             size: s.size,
             alloc: s.alloc,
             ino: s.ino,
+            dataless: s.dataless,
             frees,
         }),
         Kind::Symlink => plan.links.push(LinkItem {
@@ -251,7 +259,12 @@ pub fn build(
             skipped.push(s.rel.clone());
             continue;
         }
+        let leave = pins.leave_online && s.dataless;
         let Some(d) = dest_by_key.get(&k).copied() else {
+            if leave {
+                plan.online_only.push((s.rel.clone(), s.size));
+                continue;
+            }
             if s.kind == Kind::Dir {
                 plan.dirs.push(s.clone());
             }
@@ -259,6 +272,15 @@ pub fn build(
             continue;
         };
         matched.insert(&d.rel);
+        // An online-only file whose backup is current needs no reading; any
+        // other stays as the backup has it.
+        if leave && !(d.kind == Kind::File && same_file(s, d, vol)) {
+            plan.online_only.push((s.rel.clone(), s.size));
+            if d.kind == Kind::Dir {
+                kept_dirs.push(&d.rel);
+            }
+            continue;
+        }
         let replacing = match (s.kind, d.kind) {
             (Kind::Dir, Kind::Dir) | (Kind::File, Kind::File) | (Kind::File, Kind::Symlink) => {
                 false
@@ -383,10 +405,17 @@ mod tests {
             link_target: None,
             ino: 0,
             xattrs: 0,
+            dataless: false,
         }
     }
     fn f(rel: &str, size: u64, mtime: i64) -> Entry {
         e(rel, Kind::File, size, mtime)
+    }
+    fn online(rel: &str, size: u64, mtime: i64) -> Entry {
+        Entry {
+            dataless: true,
+            ..f(rel, size, mtime)
+        }
     }
     fn d(rel: &str) -> Entry {
         Entry {
@@ -458,6 +487,59 @@ mod tests {
         assert_eq!(newer.copies[0].frees, 3);
         let bigger = build(&[f("a", 4, 10)], &[f("a", 3, 10)], &[], true);
         assert_eq!(bigger.copies.len(), 1);
+    }
+
+    #[test]
+    fn online_only_files_are_left_online_and_their_backups_kept() {
+        let leave = Pins {
+            leave_online: true,
+            ..Pins::default()
+        };
+        let source = [
+            online("new", 5, 1),
+            online("changed", 5, 2),
+            online("same", 5, 1),
+            online("was_dir", 5, 1),
+            f("local", 3, 1),
+        ];
+        let dest = [
+            f("changed", 5, 1),
+            f("same", 5, 1),
+            d("was_dir"),
+            f("was_dir/x", 2, 1),
+            f("gone", 1, 1),
+        ];
+        let p = super::build(&source, &dest, &[], ci(), leave);
+        assert_eq!(
+            names(p.online_only.iter().map(|o| &o.0)),
+            ["changed", "new", "was_dir"]
+        );
+        assert_eq!(p.online_only.iter().map(|o| o.1).sum::<u64>(), 15);
+        assert_eq!(names(p.copies.iter().map(|c| &c.rel)), ["local"]);
+        assert_eq!(
+            p.totals.unchanged_files, 1,
+            "a current backup needs no download"
+        );
+        assert_eq!(names(p.deletes.iter().map(|x| &x.rel)), ["gone"]);
+        assert!(p.replaces.is_empty());
+
+        // Downloading: they are ordinary copies, marked as online-only.
+        let p = super::build(&source, &dest, &[], ci(), Pins::default());
+        assert!(p.online_only.is_empty());
+        let copies: Vec<(&str, bool)> = p
+            .copies
+            .iter()
+            .map(|c| (c.rel.as_str(), c.dataless))
+            .collect();
+        assert_eq!(
+            copies,
+            [
+                ("changed", true),
+                ("local", false),
+                ("new", true),
+                ("was_dir", true)
+            ]
+        );
     }
 
     #[test]
@@ -681,6 +763,7 @@ mod tests {
         let pins = Pins {
             keep: &keep,
             mounts: &keep[1..],
+            ..Pins::default()
         };
         let p = super::build(
             &[
@@ -710,6 +793,7 @@ mod tests {
         let under_mount = Pins {
             keep: &[],
             mounts: &keep[1..],
+            ..Pins::default()
         };
         let p = super::build(&[d("mnt"), f("mnt/x", 1, 1)], &[], &[], ci(), under_mount);
         assert!(p.mkdirs.is_empty() && p.copies.is_empty() && p.dirs.is_empty());
@@ -721,6 +805,7 @@ mod tests {
         let pins = Pins {
             keep: &keep,
             mounts: &[],
+            ..Pins::default()
         };
         let p = super::build(
             &[f("a", 1, 1)],

@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::MARKER_NAME;
-use crate::config::Preset;
-use crate::dest::{Dest, DestOps, Marker, SimulatedDest, Source, temp_rel};
+use crate::config::{OnlineOnly, Preset};
+use crate::dest::{
+    Dest, DestOps, Marker, SimulatedDest, Source, forbid_downloads, is_not_downloaded, temp_rel,
+};
 use crate::plan::{self, Pins, Plan, Replace, Totals, Volume, name_key};
 use crate::preflight::{self, Env, MarkerStatus};
 use crate::relpath::RelPath;
@@ -70,6 +72,8 @@ pub enum PlanAction {
     Copy,
     Link,
     Delete,
+    /// An online-only file left online (`online_only = "skip"`).
+    Online,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -91,6 +95,12 @@ pub struct PlanSummary {
     pub collisions: u64,
     pub scan_errors: u64,
     pub case_insensitive: bool,
+    /// Online-only files that need copying: skipped, or downloaded first,
+    /// as `online_only` says.
+    #[serde(default)]
+    pub online_only_files: u64,
+    #[serde(default)]
+    pub online_only_bytes: u64,
 }
 
 impl PlanSummary {
@@ -159,6 +169,9 @@ pub struct RunStats {
     pub unchanged: u64,
     pub warnings: u64,
     pub errors: Vec<FileErr>,
+    /// Online-only files not backed up (`online_only = "skip"`).
+    #[serde(default)]
+    pub online_only: Vec<String>,
     /// Why the run stopped early, if it did.
     pub message: Option<String>,
 }
@@ -174,6 +187,7 @@ impl RunStats {
             unchanged: 0,
             warnings: 0,
             errors: Vec::new(),
+            online_only: Vec::new(),
             message: None,
         }
     }
@@ -201,6 +215,15 @@ fn error(stats: &mut RunStats, emit: &mut dyn FnMut(Event), path: &str, message:
         path: path.to_string(),
         message,
     });
+}
+
+/// `EDEADLK` from reading an online-only file means "not downloaded".
+fn read_error(e: std::io::Error) -> String {
+    if is_not_downloaded(&e) {
+        "online-only file, not downloaded (it went online-only after the scan)".to_string()
+    } else {
+        e.to_string()
+    }
 }
 
 fn warn(stats: &mut RunStats, emit: &mut dyn FnMut(Event), message: String) {
@@ -251,6 +274,9 @@ fn list_plan(plan: &Plan, emit: &mut dyn FnMut(Event)) {
         .flat_map(|r| &r.old);
     for d in replaced.chain(&plan.deletes) {
         item(PlanAction::Delete, d.rel.to_string());
+    }
+    for (o, _) in &plan.online_only {
+        item(PlanAction::Online, o.to_string());
     }
 }
 
@@ -431,11 +457,28 @@ fn execute(
         .chain(&dst.mounts)
         .cloned()
         .collect();
+    let leave_online = preset.online_only == OnlineOnly::Skip;
     let pins = Pins {
         keep: &keep,
         mounts: &dst.mounts,
+        leave_online,
     };
     let plan = plan::build(&src.entries, &dst.entries, &dst.temp_files, vol, pins);
+    stats.online_only = plan
+        .online_only
+        .iter()
+        .map(|(o, _)| o.to_string())
+        .collect();
+    let (online_only_files, online_only_bytes) = if leave_online {
+        let n = plan.online_only.len() as u64;
+        (n, plan.online_only.iter().map(|(_, size)| size).sum())
+    } else {
+        let downloads = plan.copies.iter().filter(|c| c.dataless);
+        (
+            downloads.clone().count() as u64,
+            downloads.map(|c| c.size).sum(),
+        )
+    };
     for (skipped, kept) in &plan.collisions {
         error(
             stats,
@@ -486,6 +529,8 @@ fn execute(
         collisions: plan.collisions.len() as u64,
         scan_errors: (src.errors.len() + dst.errors.len()) as u64,
         case_insensitive: vol.case_insensitive,
+        online_only_files,
+        online_only_bytes,
     };
     emit(Event::Planned {
         summary: summary.clone(),
@@ -564,6 +609,13 @@ fn execute(
             format!("cannot open {}: {e}", resolved.source.display()),
         )
     })?;
+    // A file made online-only since the scan must not be downloaded either.
+    if leave_online && let Err(e) = forbid_downloads() {
+        return Err(stop(
+            Outcome::PreflightFailed,
+            format!("cannot keep online-only files from downloading: {e}"),
+        ));
+    }
     // Folders made read-only by an earlier finalize must accept changes
     // again. Their modes are put back at the end (AUD-L4).
     let mut modes: Vec<(Option<RelPath>, u32)> = Vec::new();
@@ -672,7 +724,7 @@ fn execute(
         let mut file = match source.open_file(&c.rel, c.ino) {
             Ok(f) => f,
             Err(e) => {
-                error(stats, emit, c.rel.as_str(), e);
+                error(stats, emit, c.rel.as_str(), read_error(e));
                 continue;
             }
         };
@@ -708,7 +760,7 @@ fn execute(
             Err(_) if cancel.load(Ordering::Relaxed) => {
                 return Err(abandon(dest, &staged, &modes));
             }
-            Err(e) => error(stats, emit, c.rel.as_str(), e),
+            Err(e) => error(stats, emit, c.rel.as_str(), read_error(e)),
         }
     }
     for l in &plan.links {
@@ -864,6 +916,7 @@ mod tests {
             size,
             alloc,
             ino: 0,
+            dataless: false,
             frees,
         }
     }

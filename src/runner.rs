@@ -289,7 +289,7 @@ fn execute_one(ctx: &Ctx, preset: &Preset, sandbox: bool, prompter: &mut dyn Pro
                             view.note(&l);
                         }
                     } else {
-                        view.note(&plain::planned_line(summary));
+                        view.note(&plain::planned_line(preset, summary));
                     }
                 }
                 // Unknown counts as unencrypted: the warning fails closed (AUD-M5).
@@ -352,6 +352,13 @@ fn run_one(ctx: &Ctx, preset: &Preset, sandbox: bool, prompter: &mut dyn Prompte
     );
     for l in plain::error_lines(&stats, 10) {
         println!("{l}");
+    }
+    // A verbose plan has listed them already.
+    let listed = ctx.verbose && ctx.mode == Mode::DryRun;
+    if !listed {
+        for l in plain::online_only_lines(&preset.name, &stats, 10) {
+            println!("{l}");
+        }
     }
     let rec = RunRecord::new(
         &preset.name,
@@ -485,6 +492,8 @@ mod tests {
             collisions: 0,
             scan_errors: 0,
             case_insensitive: true,
+            online_only_files: 0,
+            online_only_bytes: 0,
         }
     }
 

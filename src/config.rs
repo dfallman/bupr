@@ -52,6 +52,18 @@ impl ConfigError {
     }
 }
 
+/// What to do with online-only (dataless) files from iCloud Drive or
+/// Dropbox, whose data is not on this Mac.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnlineOnly {
+    /// Leave them online; new or changed ones are not backed up.
+    #[default]
+    Skip,
+    /// Let macOS download them, which keeps them downloaded on this Mac.
+    Download,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -78,6 +90,8 @@ struct RawPreset {
     allow_internal: bool,
     #[serde(default)]
     secrets_require_encryption: bool,
+    #[serde(default)]
+    online_only: OnlineOnly,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -96,6 +110,7 @@ pub struct Preset {
     /// Ask (or, unattended, abort) before copying secret files to a drive
     /// that is not known to be encrypted (AUD-M5).
     pub secrets_require_encryption: bool,
+    pub online_only: OnlineOnly,
 }
 
 impl Preset {
@@ -113,6 +128,7 @@ impl Preset {
             secrets: Vec::new(),
             allow_internal: false,
             secrets_require_encryption: false,
+            online_only: OnlineOnly::Skip,
         }
     }
 
@@ -159,6 +175,7 @@ impl Preset {
             secrets: raw.secrets,
             allow_internal: raw.allow_internal,
             secrets_require_encryption: raw.secrets_require_encryption,
+            online_only: raw.online_only,
         };
         preset.filter().map_err(invalid)?;
         Ok(preset)
@@ -312,6 +329,7 @@ mod tests {
         assert_eq!(p.max_delete, 200);
         assert_eq!(p.max_delete_bytes, 10_000_000_000);
         assert!(!p.allow_internal);
+        assert_eq!(p.online_only, OnlineOnly::Skip);
         assert!(p.exclude.is_empty() && p.include.is_empty() && p.description.is_none());
     }
 
@@ -362,6 +380,13 @@ mod tests {
         );
         assert!(
             parse("[presets.d]\nsource=\"/a\"\ndestination=\"/b\"\nrules=[\"rust\"]\n").is_err()
+        );
+        let dl =
+            parse("[presets.d]\nsource=\"/a\"\ndestination=\"/b\"\nonline_only=\"download\"\n")
+                .unwrap();
+        assert_eq!(dl.get("d").unwrap().online_only, OnlineOnly::Download);
+        assert!(
+            parse("[presets.d]\nsource=\"/a\"\ndestination=\"/b\"\nonline_only=\"yes\"\n").is_err()
         );
         let media = parse(
             "[presets.d]\nsource=\"/a\"\ndestination=\"/b\"\nrules=[\"junk\", \"video\", \"music\"]\n",

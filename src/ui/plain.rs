@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::config::Preset;
+use crate::config::{OnlineOnly, Preset};
 use crate::engine::{Event, Mode, Outcome, PlanAction, PlanSummary, RunStats};
 use crate::preflight::MarkerStatus;
 use crate::ui::dashboard::{DashState, Phase};
@@ -56,6 +56,7 @@ pub fn action_symbol(a: PlanAction) -> &'static str {
         PlanAction::Mkdir => "d",
         PlanAction::Rename => ">",
         PlanAction::Delete => "-",
+        PlanAction::Online => "○",
     }
 }
 
@@ -74,15 +75,23 @@ pub fn progress_line(preset: &str, s: &DashState) -> String {
     )
 }
 
-pub fn planned_line(s: &PlanSummary) -> String {
+pub fn planned_line(preset: &Preset, s: &PlanSummary) -> String {
     let t = &s.totals;
-    format!(
+    let mut line = format!(
         "  {} files ({}) to copy · {} to delete · {} unchanged",
         count(t.copy_files),
         bytes(t.copy_bytes),
         count(t.delete_entries),
         count(t.unchanged_files)
-    )
+    );
+    if s.online_only_files > 0 {
+        let what = match preset.online_only {
+            OnlineOnly::Skip => "skipped",
+            OnlineOnly::Download => "to download first",
+        };
+        line += &format!(" · {} online-only {what}", count(s.online_only_files));
+    }
+    line
 }
 
 pub fn plan_lines(preset: &Preset, s: &PlanSummary, home: &Path) -> Vec<String> {
@@ -138,6 +147,17 @@ pub fn plan_lines(preset: &Preset, s: &PlanSummary, home: &Path) -> Vec<String> 
             bytes(s.needed_bytes)
         ));
     }
+    if s.online_only_files > 0 {
+        let what = match preset.online_only {
+            OnlineOnly::Skip => "not on this Mac; skipped (online_only = \"skip\")",
+            OnlineOnly::Download => "not on this Mac; downloaded before copying",
+        };
+        v.push(format!(
+            "  online     {} files ({}) {what}",
+            count(s.online_only_files),
+            bytes(s.online_only_bytes)
+        ));
+    }
     if s.secret_files > 0 {
         v.push(format!(
             "  secrets    {} file(s) such as .env or keys",
@@ -166,13 +186,19 @@ pub fn summary_line(preset: &str, stats: &RunStats, elapsed: u64) -> String {
     } else {
         ("copied", "deleted")
     };
-    let work = format!(
+    let mut work = format!(
         "{} files ({}) {copied}, {} {deleted}, {} unchanged",
         count(stats.copied_files),
         bytes(stats.copied_bytes),
         count(stats.deleted),
         count(stats.unchanged)
     );
+    if !stats.online_only.is_empty() {
+        work += &format!(
+            ", {} online-only skipped",
+            count(stats.online_only.len() as u64)
+        );
+    }
     let n = stats.errors.len();
     let errs = format!("{n} error{}", if n == 1 { "" } else { "s" });
     let msg = stats.message.as_deref();
@@ -212,6 +238,25 @@ pub fn error_lines(stats: &RunStats, max: usize) -> Vec<String> {
         v.push(format!(
             "    … and {} more (see `bupr log`)",
             stats.errors.len() - max
+        ));
+    }
+    v
+}
+
+/// The online-only files a run left out, so they are not missed.
+pub fn online_only_lines(preset: &str, stats: &RunStats, max: usize) -> Vec<String> {
+    let mut v: Vec<String> = stats
+        .online_only
+        .iter()
+        .take(max)
+        .map(|p| {
+            format!("    ○ {p} skipped (online-only; set online_only = \"download\" to back it up)")
+        })
+        .collect();
+    if stats.online_only.len() > max {
+        v.push(format!(
+            "    … and {} more online-only files (`bupr {preset} --dry-run -v` lists them all)",
+            count((stats.online_only.len() - max) as u64)
         ));
     }
     v
@@ -281,5 +326,23 @@ mod tests {
         assert_eq!(lines.len(), 11);
         assert_eq!(lines[0], "    ✗ f0: x");
         assert_eq!(lines[10], "    … and 2 more (see `bupr log`)");
+    }
+
+    #[test]
+    fn online_only_files_are_listed_and_counted() {
+        let mut s = stats(Outcome::Ok, Mode::Run);
+        assert!(online_only_lines("box", &s, 10).is_empty());
+        s.online_only = (0..12).map(|i| format!("docs/f{i}.pdf")).collect();
+        let lines = online_only_lines("box", &s, 10);
+        assert_eq!(lines.len(), 11);
+        assert_eq!(
+            lines[0],
+            "    ○ docs/f0.pdf skipped (online-only; set online_only = \"download\" to back it up)"
+        );
+        assert_eq!(
+            lines[10],
+            "    … and 2 more online-only files (`bupr box --dry-run -v` lists them all)"
+        );
+        assert!(summary_line("box", &s, 3).contains("96,110 unchanged, 12 online-only skipped"));
     }
 }
