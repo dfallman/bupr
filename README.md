@@ -16,7 +16,7 @@ preset's name each time you want to run the job.
 
 ### Example use
 You type `bupr dev` at the prompt and your 'dev' preset job runs, 
-mirroring your `~/dev` folder to an external USB backup drive. 
+mirroring your `~/dev` folder to an external USB backup drive. Type `bupr --all` and all your jobs run.
 
 Modern apps across programming, video editing, music editing, and 3D modelling create gigabytes of
 temporary output that your tools can easily regenerate that you typically don't need or
