@@ -1,6 +1,6 @@
 # bupr
 
-**Preset-based mirror backups for the macOS terminal**
+**Mirror folders from your Mac to your external SSD or NAS from the terminal. Preset-based, smart, and safe.**
 
 Bupr allows you to quickly and safely mirror folders in macOS. A typical use scenario is to backup 
 a folder structure on your internal storage to an external drive or a mounted NAS device.
